@@ -64,10 +64,20 @@ them before reconciling.
 1. ✅ **Reconciler + TUI** over an offline fixture of the real data.
 2. ✅ **Live sources** — NetBox + DNS over an SSH vantage, parallel ARP probe, merged
    behind the fact shape. `--live` reconciles a real `/24` in seconds.
-3. **Writes** — allocate in NetBox + push forward/reverse DNS to `dns1` (edit
-   `db.nfra.nl`, bump serial, `rndc reload`), with a diff preview and `--dry-run`.
+3. 🚧 **Writes** — an allocation **planner** with a `--dry-run` diff is done: NetBox
+   create + forward `A` + reverse `PTR`, refusing any non-free target. The live
+   `--write` apply is wired but gated and unrun; the DNS SOA-serial bump and reverse
+   mechanism are flagged `[needs review]` before it can be trusted.
 4. **Node-graph DNS** — the long vision in [docs/vision.md](docs/vision.md): DNS as a
-   mullion node graph, nice auto-layout, transform-and-migrate to Technitium/PowerDNS.
+   mullion node graph, live **bitstream** wires, and eventually the switch/router
+   fabric (with the AAA/security that must gate it).
+
+```sh
+# preview the exact changes to give 10.87.3.69 the name dop370-ipmi.nfra.nl
+netpush --allocate dop370-ipmi.nfra.nl --addr 10.87.3.69 \
+        --range 10.87.3.0/24 --alloc-prefix 20 --live
+# add --write to apply (NetBox create runs; DNS steps still need review)
+```
 
 ## Licence
 

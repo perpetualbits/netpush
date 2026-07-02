@@ -8,13 +8,17 @@
 //! same [`reconcile::AddressFacts`] shape.
 
 mod fixture;
+mod plan;
 mod reconcile;
 mod sources;
 mod tui;
 
+use std::net::Ipv4Addr;
+
 use anyhow::Context;
 use clap::Parser;
 
+use plan::{Allocation, Plan};
 use reconcile::{AddressFacts, Cidr};
 use sources::{dns::DnsSource, netbox::NetboxSource, probe::ProbeSource, FactSource, Vantage};
 
@@ -57,6 +61,20 @@ struct Args {
     /// Print the reconciled table to stdout and exit (no TUI). Good for scripts/CI.
     #[arg(long)]
     list: bool,
+
+    /// Plan allocating an address (see --addr) as this FQDN; prints the change plan.
+    #[arg(long, value_name = "FQDN")]
+    allocate: Option<String>,
+
+    /// The address to allocate (required with --allocate).
+    #[arg(long, value_name = "IP")]
+    addr: Option<String>,
+
+    /// Network prefix length to record in NetBox for the allocated address. Defaults
+    /// to --range's, but the viewing slice (e.g. /24) often differs from the real
+    /// network (e.g. 10.87.0.0/20 → pass --alloc-prefix 20).
+    #[arg(long, value_name = "LEN")]
+    alloc_prefix: Option<u8>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -70,12 +88,56 @@ fn main() -> anyhow::Result<()> {
         demo_facts(&range)
     };
 
+    if let Some(fqdn) = args.allocate.clone() {
+        return run_allocation(range, &args, &facts, fqdn);
+    }
+
     if args.list {
         list_table(range, &facts);
         return Ok(());
     }
 
     tui::run(range, facts, args.write, args.dry_run)
+}
+
+/// Build and preview (or, with `--write`, apply) a plan to allocate one address.
+///
+/// The address is checked against the reconciled current state and the plan refuses
+/// a non-free target. Without `--live` the free-check runs against offline/demo data,
+/// so real allocations should pass `--live`.
+fn run_allocation(range: Cidr, args: &Args, facts: &[AddressFacts], fqdn: String) -> anyhow::Result<()> {
+    let addr: Ipv4Addr = args
+        .addr
+        .as_deref()
+        .context("--allocate requires --addr <IP>")?
+        .parse()
+        .context("invalid --addr")?;
+    anyhow::ensure!(
+        range.contains(addr),
+        "{addr} is not inside {}/{}",
+        range.base,
+        range.prefix_len
+    );
+
+    let rows = reconcile::reconcile(range, facts);
+    let prefix_len = args.alloc_prefix.unwrap_or(range.prefix_len);
+    let alloc = Allocation { addr, prefix_len, fqdn };
+    let plan = Plan::for_allocation(alloc, &args.netbox_url, Some(&rows))?;
+
+    if !args.live {
+        eprintln!("note: free-check used offline data; pass --live to check against reality.\n");
+    }
+    println!("{}", plan.preview());
+
+    if args.write && !args.dry_run {
+        eprintln!("--write: applying on {} …", args.vantage);
+        let token = get_token(&args.token_pass)?;
+        plan.apply(&Vantage::new(&args.vantage), &token)?;
+        eprintln!("done.");
+    } else {
+        println!("(dry-run — pass --write to apply)");
+    }
+    Ok(())
 }
 
 /// The offline demo facts, kept to whatever falls inside `range`.
