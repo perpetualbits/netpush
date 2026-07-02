@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026  Epsilon Null Operation
+
+[package]
+name = "netpush"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+description = "Reconcile IP allocation across NetBox, DNS and the live network, then push the fixes — a TUI."
+
+[[bin]]
+name = "netpush"
+path = "src/main.rs"
+
+[dependencies]
+anyhow    = "1"
+clap      = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+# mullion is Roland's terminal-UI tiling engine; census is built on it too.
+mullion   = { path = "../mullion", version = "0.3.0" }
+
+[profile.release]
+strip = true
