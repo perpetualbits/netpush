@@ -1,0 +1,21 @@
+# netpush config — copy to ~/.config/netpush/config.toml (or pass --config FILE).
+# Every key is optional; omitted keys keep their built-in default (shown below).
+# CLI flags (--vantage, --range, …) override anything set here.
+#
+# No secrets live here: the NetBox token is fetched from `pass` (the entry named by
+# `token_pass`) or the $NETPUSH_NETBOX_TOKEN environment variable.
+
+# Default CIDR range to browse.
+range      = "10.87.3.0/24"
+
+# SSH host to run NetBox + DNS queries from (must reach NetBox and internal DNS).
+vantage    = "dns1.astron.nl"
+
+# SSH host on the target L2 to run the ARP/ping probe from.
+probe_host = "takkie.astron.nl"
+
+# NetBox base URL.
+netbox_url = "https://netbox.astron.nl"
+
+# `pass` entry holding the NetBox API token.
+token_pass = "astron/netbox.astron.nl/dns_api_token"

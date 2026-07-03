@@ -7,6 +7,7 @@
 //! [`fixture`]) so the UI works offline; live NetBox/DNS sources slot in behind the
 //! same [`reconcile::AddressFacts`] shape.
 
+mod config;
 mod dns;
 mod fixture;
 mod graph;
@@ -16,10 +17,12 @@ mod sources;
 mod tui;
 
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::Parser;
 
+use config::Config;
 use plan::{Allocation, Plan};
 use reconcile::{AddressFacts, Cidr};
 use sources::{dns::DnsSource, netbox::NetboxSource, probe::ProbeSource, FactSource, Vantage};
@@ -28,29 +31,34 @@ use sources::{dns::DnsSource, netbox::NetboxSource, probe::ProbeSource, FactSour
 #[derive(Parser, Debug)]
 #[command(name = "netpush", about = "Reconcile IP allocation across NetBox, DNS and the live network")]
 struct Args {
-    /// CIDR range to browse.
-    #[arg(long, default_value = "10.87.3.0/24")]
-    range: String,
+    /// Config file (default: ~/.config/netpush/config.toml if present).
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// CIDR range to browse. Overrides the config's `range`.
+    #[arg(long)]
+    range: Option<String>,
 
     /// Gather facts from the live NetBox/DNS/probe sources instead of the demo data.
     #[arg(long)]
     live: bool,
 
-    /// SSH host to run NetBox + DNS queries from (must reach NetBox and internal DNS).
-    #[arg(long, default_value = "dns1.astron.nl")]
-    vantage: String,
+    /// SSH host to run NetBox + DNS queries from. Overrides the config's `vantage`.
+    #[arg(long)]
+    vantage: Option<String>,
 
-    /// SSH host on the target L2 to run the ARP/ping probe from.
-    #[arg(long, default_value = "takkie.astron.nl")]
-    probe_host: String,
+    /// SSH host on the target L2 for the ARP/ping probe. Overrides `probe_host`.
+    #[arg(long)]
+    probe_host: Option<String>,
 
-    /// NetBox base URL.
-    #[arg(long, default_value = "https://netbox.astron.nl")]
-    netbox_url: String,
+    /// NetBox base URL. Overrides the config's `netbox_url`.
+    #[arg(long)]
+    netbox_url: Option<String>,
 
     /// `pass` entry holding the NetBox API token (or set NETPUSH_NETBOX_TOKEN).
-    #[arg(long, default_value = "astron/netbox.astron.nl/dns_api_token")]
-    token_pass: String,
+    /// Overrides the config's `token_pass`.
+    #[arg(long)]
+    token_pass: Option<String>,
 
     /// Allow pushing NetBox/DNS changes (reserved — write path not implemented yet).
     #[arg(long)]
@@ -82,16 +90,34 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let range = Cidr::parse(&args.range).map_err(|e| anyhow::anyhow!(e))?;
+    // Load the config (optional), then let any CLI flag override it.
+    let mut cfg = Config::load(args.config.as_deref())?;
+    if let Some(v) = &args.range {
+        cfg.range = v.clone();
+    }
+    if let Some(v) = &args.vantage {
+        cfg.vantage = v.clone();
+    }
+    if let Some(v) = &args.probe_host {
+        cfg.probe_host = v.clone();
+    }
+    if let Some(v) = &args.netbox_url {
+        cfg.netbox_url = v.clone();
+    }
+    if let Some(v) = &args.token_pass {
+        cfg.token_pass = v.clone();
+    }
+
+    let range = Cidr::parse(&cfg.range).map_err(|e| anyhow::anyhow!(e))?;
 
     let facts = if args.live {
-        gather_live(&range, &args)?
+        gather_live(&range, &cfg)?
     } else {
         demo_facts(&range)
     };
 
     if let Some(fqdn) = args.allocate.clone() {
-        return run_allocation(range, &args, &facts, fqdn);
+        return run_allocation(range, &args, &cfg, &facts, fqdn);
     }
 
     if args.list {
@@ -107,7 +133,7 @@ fn main() -> anyhow::Result<()> {
 /// The address is checked against the reconciled current state and the plan refuses
 /// a non-free target. Without `--live` the free-check runs against offline/demo data,
 /// so real allocations should pass `--live`.
-fn run_allocation(range: Cidr, args: &Args, facts: &[AddressFacts], fqdn: String) -> anyhow::Result<()> {
+fn run_allocation(range: Cidr, args: &Args, cfg: &Config, facts: &[AddressFacts], fqdn: String) -> anyhow::Result<()> {
     let addr: Ipv4Addr = args
         .addr
         .as_deref()
@@ -124,7 +150,7 @@ fn run_allocation(range: Cidr, args: &Args, facts: &[AddressFacts], fqdn: String
     let rows = reconcile::reconcile(range, facts);
     let prefix_len = args.alloc_prefix.unwrap_or(range.prefix_len);
     let alloc = Allocation { addr, prefix_len, fqdn };
-    let plan = Plan::for_allocation(alloc, &args.netbox_url, Some(&rows))?;
+    let plan = Plan::for_allocation(alloc, &cfg.netbox_url, Some(&rows))?;
 
     if !args.live {
         eprintln!("note: free-check used offline data; pass --live to check against reality.\n");
@@ -132,9 +158,9 @@ fn run_allocation(range: Cidr, args: &Args, facts: &[AddressFacts], fqdn: String
     println!("{}", plan.preview());
 
     if args.write && !args.dry_run {
-        eprintln!("--write: applying on {} …", args.vantage);
-        let token = get_token(&args.token_pass)?;
-        plan.apply(&Vantage::new(&args.vantage), &token)?;
+        eprintln!("--write: applying on {} …", cfg.vantage);
+        let token = get_token(&cfg.token_pass)?;
+        plan.apply(&Vantage::new(&cfg.vantage), &token)?;
         eprintln!("done.");
     } else {
         println!("(dry-run — pass --write to apply)");
@@ -154,19 +180,19 @@ fn demo_facts(range: &Cidr) -> Vec<AddressFacts> {
 
 /// Gather NetBox + DNS + probe facts from the live sources and merge them.
 ///
-/// NetBox and DNS run on the `--vantage` host (they need internal reachability); the
-/// ping probe runs on `--probe-host`, which must sit on the target L2.
-fn gather_live(range: &Cidr, args: &Args) -> anyhow::Result<Vec<AddressFacts>> {
-    let vantage = Vantage::new(&args.vantage);
-    let token = get_token(&args.token_pass)?;
+/// NetBox and DNS run on the `vantage` host (they need internal reachability); the
+/// ping probe runs on `probe_host`, which must sit on the target L2.
+fn gather_live(range: &Cidr, cfg: &Config) -> anyhow::Result<Vec<AddressFacts>> {
+    let vantage = Vantage::new(&cfg.vantage);
+    let token = get_token(&cfg.token_pass)?;
 
     let netbox = NetboxSource {
         vantage: vantage.clone(),
-        base_url: args.netbox_url.clone(),
+        base_url: cfg.netbox_url.clone(),
         token,
     };
     let dns = DnsSource { vantage: vantage.clone() };
-    let probe = ProbeSource { vantage: Vantage::new(&args.probe_host) };
+    let probe = ProbeSource { vantage: Vantage::new(&cfg.probe_host) };
 
     Ok(sources::merge(vec![
         netbox.gather(range).context("NetBox source")?,

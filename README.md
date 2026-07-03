@@ -46,6 +46,19 @@ Keys: `j/k` move · `g/G` top/bottom · `f` next free · `q` quit.
 
 Read-only by default; `--write` / `--dry-run` are reserved for when the push path lands.
 
+### Config
+
+Optional, like census. Settings live in `~/.config/netpush/config.toml`
+(XDG-aware; or pass `--config FILE`). Every key defaults, so the file is optional and
+any CLI flag overrides it. Copy the template to start:
+
+```sh
+cp docs/config.toml.example ~/.config/netpush/config.toml
+```
+
+No secrets in the file — the NetBox token comes from `pass` (entry named by
+`token_pass`) or `$NETPUSH_NETBOX_TOKEN`.
+
 ### How live gathering works
 
 netpush usually runs off the ASTRON network, so each source runs its query on an
