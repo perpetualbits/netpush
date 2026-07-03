@@ -37,20 +37,35 @@ pub fn gather_live(range: &Cidr, cfg: &Config) -> anyhow::Result<Vec<AddressFact
 /// Keeping it out of argv and config: the env var wins for CI, otherwise we shell
 /// out to `pass <entry>` and take the first line.
 ///
+/// We inherit the terminal for the child's stdin/stderr so GPG's pinentry can prompt
+/// for the passphrase (and its own errors are visible) — capturing everything, as a
+/// plain `.output()` does, closes stdin and makes pinentry fail even when the same
+/// command works when typed. Only stdout is captured, for the token.
+///
 /// # Errors
 /// Fails if neither source yields a non-empty token.
 pub fn get_token(pass_entry: &str) -> anyhow::Result<String> {
+    use std::process::{Command, Stdio};
+
     if let Ok(t) = std::env::var("NETPUSH_NETBOX_TOKEN") {
         if !t.trim().is_empty() {
             return Ok(t.trim().to_string());
         }
     }
-    let out = std::process::Command::new("pass")
+    let out = Command::new("pass")
         .arg(pass_entry)
-        .output()
-        .with_context(|| format!("running `pass {pass_entry}` for the NetBox token"))?;
+        .stdin(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running `pass {pass_entry}`"))?
+        .wait_with_output()
+        .with_context(|| format!("waiting for `pass {pass_entry}`"))?;
     if !out.status.success() {
-        anyhow::bail!("`pass {pass_entry}` failed; set NETPUSH_NETBOX_TOKEN instead");
+        anyhow::bail!(
+            "`pass {pass_entry}` failed (see any GPG output above). Is the key unlocked? \
+             Otherwise run:  export NETPUSH_NETBOX_TOKEN=$(pass {pass_entry})"
+        );
     }
     let token = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").trim().to_string();
     if token.is_empty() {
