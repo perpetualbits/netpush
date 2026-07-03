@@ -11,6 +11,7 @@ mod config;
 mod dns;
 mod fixture;
 mod graph;
+mod live;
 mod plan;
 mod reconcile;
 mod sources;
@@ -25,7 +26,7 @@ use clap::Parser;
 use config::Config;
 use plan::{Allocation, Plan};
 use reconcile::{AddressFacts, Cidr};
-use sources::{dns::DnsSource, netbox::NetboxSource, probe::ProbeSource, FactSource, Vantage};
+use sources::Vantage;
 
 /// Command-line options — mirrors census's read-only-by-default posture.
 #[derive(Parser, Debug)]
@@ -111,7 +112,7 @@ fn main() -> anyhow::Result<()> {
     let range = Cidr::parse(&cfg.range).map_err(|e| anyhow::anyhow!(e))?;
 
     let facts = if args.live {
-        gather_live(&range, &cfg)?
+        live::gather_live(&range, &cfg)?
     } else {
         demo_facts(&range)
     };
@@ -125,7 +126,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    tui::run(range, facts, args.write, args.dry_run, args.live)
+    tui::run(range, facts, args.write, args.dry_run, args.live, cfg)
 }
 
 /// Build and preview (or, with `--write`, apply) a plan to allocate one address.
@@ -159,7 +160,7 @@ fn run_allocation(range: Cidr, args: &Args, cfg: &Config, facts: &[AddressFacts]
 
     if args.write && !args.dry_run {
         eprintln!("--write: applying on {} …", cfg.vantage);
-        let token = get_token(&cfg.token_pass)?;
+        let token = live::get_token(&cfg.token_pass)?;
         plan.apply(&Vantage::new(&cfg.vantage), &token)?;
         eprintln!("done.");
     } else {
@@ -176,58 +177,6 @@ fn demo_facts(range: &Cidr) -> Vec<AddressFacts> {
     } else {
         Vec::new()
     }
-}
-
-/// Gather NetBox + DNS + probe facts from the live sources and merge them.
-///
-/// NetBox and DNS run on the `vantage` host (they need internal reachability); the
-/// ping probe runs on `probe_host`, which must sit on the target L2.
-fn gather_live(range: &Cidr, cfg: &Config) -> anyhow::Result<Vec<AddressFacts>> {
-    let vantage = Vantage::new(&cfg.vantage);
-    let token = get_token(&cfg.token_pass)?;
-
-    let netbox = NetboxSource {
-        vantage: vantage.clone(),
-        base_url: cfg.netbox_url.clone(),
-        token,
-    };
-    let dns = DnsSource { vantage: vantage.clone() };
-    let probe = ProbeSource { vantage: Vantage::new(&cfg.probe_host) };
-
-    Ok(sources::merge(vec![
-        netbox.gather(range).context("NetBox source")?,
-        dns.gather(range).context("DNS source")?,
-        probe.gather(range).context("probe source")?,
-    ]))
-}
-
-/// Fetch the NetBox token from `$NETPUSH_NETBOX_TOKEN`, else from `pass`.
-///
-/// Keeping it out of argv and config: the env var wins for CI, otherwise we shell
-/// out to `pass <entry>` and take the first line.
-fn get_token(pass_entry: &str) -> anyhow::Result<String> {
-    if let Ok(t) = std::env::var("NETPUSH_NETBOX_TOKEN") {
-        if !t.trim().is_empty() {
-            return Ok(t.trim().to_string());
-        }
-    }
-    let out = std::process::Command::new("pass")
-        .arg(pass_entry)
-        .output()
-        .with_context(|| format!("running `pass {pass_entry}` for the NetBox token"))?;
-    if !out.status.success() {
-        anyhow::bail!("`pass {pass_entry}` failed; set NETPUSH_NETBOX_TOKEN instead");
-    }
-    let token = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if token.is_empty() {
-        anyhow::bail!("`pass {pass_entry}` returned no token");
-    }
-    Ok(token)
 }
 
 /// Print the reconciled range as plain text: a status tally, then every address

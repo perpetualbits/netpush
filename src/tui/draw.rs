@@ -61,9 +61,25 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     let mode = app.mode_label();
     let title = format!("netpush — {}/{}", app.range.base, app.range.prefix_len);
     btxt(buf, area.x, area.y, &title, s_title());
-    // DEMO / LIVE badge just after the title, so it's obvious which data this is.
-    let (data, data_style) = if app.live { ("LIVE", s_ok()) } else { ("DEMO", s_warn()) };
-    btxt(buf, area.x + title.chars().count() as u16 + 2, area.y, data, data_style);
+    // DEMO / LIVE / LOADING badge just after the title, so the data source is obvious.
+    let (data, data_style) = if app.loading {
+        ("LOADING…", s_warn())
+    } else if app.live {
+        ("LIVE", s_ok())
+    } else {
+        ("DEMO", s_warn())
+    };
+    let badge_x = area.x + title.chars().count() as u16 + 2;
+    btxt(buf, badge_x, area.y, data, data_style);
+    // Optional status message after the badge (dim, or red on error).
+    if let Some((msg, err)) = &app.status {
+        let sx = badge_x + data.chars().count() as u16 + 2;
+        let room = area.width.saturating_sub(sx - area.x + 12); // leave space for the mode badge
+        if room > 8 {
+            let text: String = msg.chars().take(room as usize).collect();
+            btxt(buf, sx, area.y, &text, if *err { s_err() } else { s_dim() });
+        }
+    }
     // Mode badge at the right.
     btxt(
         buf,
@@ -118,6 +134,7 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
             ("j/k", "move"),
             ("f", "next free"),
             ("Enter", "inspect"),
+            ("L", "live"),
             ("Tab", "graph"),
             ("q", "quit"),
         ],
