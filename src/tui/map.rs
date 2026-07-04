@@ -28,7 +28,7 @@ use super::app::{App, DensityStyle};
 use super::draw::{btxt, keyhints};
 use super::theme::{s_accent, s_dim, s_sel, s_title};
 use crate::map::MapGrid;
-use crate::reconcile::{self, AddressFacts, Cidr};
+use crate::reconcile::{self, AddressFacts, Cidr, Subnet};
 
 /// Empty IP space: a grey hollow square. The small `▫` (not the full-size `□`) reads
 /// better on a dense grid — the look from aerie's `spiral_stress`.
@@ -230,14 +230,20 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     );
     btxt(buf, area.x, info_y, &clip(&info, area.width), s_accent());
 
-    // Scope breadcrumb: outermost range › … › current, so you never lose your place.
+    // Scope breadcrumb: outermost range › … › current, plus the real (NetBox) subnet
+    // the cursor sits in — variable-length, so it differs from the fixed Hilbert cell.
     let crumb = app
         .scope_chain()
         .iter()
         .map(|c| format!("{}/{}", c.base, c.prefix_len))
         .collect::<Vec<_>>()
         .join(" › ");
-    btxt(buf, area.x, scope_y, &clip(&format!("scope: {crumb}"), area.width), s_dim());
+    let subnet_txt = match Subnet::most_specific(&app.subnets, cell.base) {
+        Some(s) if !s.name.is_empty() => format!("   ·   subnet: {}/{} ({})", s.cidr.base, s.cidr.prefix_len, s.name),
+        Some(s) => format!("   ·   subnet: {}/{}", s.cidr.base, s.cidr.prefix_len),
+        None => String::new(),
+    };
+    btxt(buf, area.x, scope_y, &clip(&format!("scope: {crumb}{subnet_txt}"), area.width), s_dim());
 
     // Footer key hints (zoom only offered while there's a finer subnet to reach).
     let hints: &[(&str, &str)] = if zoomable {

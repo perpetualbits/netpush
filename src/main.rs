@@ -112,10 +112,11 @@ fn main() -> anyhow::Result<()> {
 
     let range = Cidr::parse(&cfg.range).map_err(|e| anyhow::anyhow!(e))?;
 
-    let facts = if args.live {
-        live::gather_live(&range, &cfg)?
+    let (facts, subnets) = if args.live {
+        let data = live::gather_live(&range, &cfg)?;
+        (data.facts, data.subnets)
     } else {
-        demo_facts(&range)
+        (demo_facts(&range), demo_subnets(&range))
     };
 
     if let Some(fqdn) = args.allocate.clone() {
@@ -127,7 +128,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    tui::run(range, facts, args.write, args.dry_run, args.live, cfg)
+    tui::run(range, facts, subnets, args.write, args.dry_run, args.live, cfg)
 }
 
 /// Build and preview (or, with `--write`, apply) a plan to allocate one address.
@@ -169,6 +170,24 @@ fn run_allocation(range: Cidr, args: &Args, cfg: &Config, facts: &[AddressFacts]
         println!("(dry-run — pass --write to apply)");
     }
     Ok(())
+}
+
+/// A few plausible demo subnets (NetBox prefixes) inside `10.87.3.0/24`, kept to those
+/// that overlap `range`, so the map's "which subnet am I in?" works offline. Variable
+/// lengths on purpose, to show nested subnets (a /26 inside the /24).
+fn demo_subnets(range: &Cidr) -> Vec<reconcile::Subnet> {
+    use reconcile::Subnet;
+    [
+        ("10.87.0.0/20", "LOFAR management"),
+        ("10.87.3.0/24", "station control"),
+        ("10.87.3.0/26", "IPMI / BMC"),
+        ("10.87.3.64/26", "compute nodes"),
+    ]
+    .into_iter()
+    .filter_map(|(c, name)| Cidr::parse(c).ok().map(|cidr| Subnet { cidr, name: name.to_string() }))
+    // Keep the ones that overlap the browsed range (contains either endpoint).
+    .filter(|s| range.contains(s.cidr.network()) || s.cidr.contains(range.network()))
+    .collect()
 }
 
 /// The offline demo facts, kept to whatever falls inside `range`.

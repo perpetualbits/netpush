@@ -7,7 +7,7 @@
 use anyhow::Context;
 
 use super::{FactSource, Vantage};
-use crate::reconcile::{AddressFacts, Cidr, NetBoxRecord};
+use crate::reconcile::{AddressFacts, Cidr, NetBoxRecord, Subnet};
 
 /// Queries NetBox for the IP objects in a prefix.
 #[derive(Debug, Clone)]
@@ -37,6 +37,66 @@ impl FactSource for NetboxSource {
             .context("querying NetBox from the vantage host")?;
         parse_ip_addresses(&json, range)
     }
+}
+
+impl NetboxSource {
+    /// Fetch the NetBox **prefixes** (defined subnets) that fall within `range`, so the
+    /// map can tell you which real, variable-length subnet the cursor is in.
+    ///
+    /// `within_include=<net>/<len>` returns every prefix inside the range (plus the
+    /// range itself). Only `prefix` and a label are kept.
+    ///
+    /// # Errors
+    /// Propagates SSH/HTTP failures or a non-JSON body.
+    pub fn gather_prefixes(&self, range: &Cidr) -> anyhow::Result<Vec<Subnet>> {
+        let url = format!(
+            "{}/api/ipam/prefixes/?within_include={}/{}&limit=1000",
+            self.base_url.trim_end_matches('/'),
+            range.network(),
+            range.prefix_len
+        );
+        let remote = format!("read TOK; curl -sS --max-time 25 -H \"Authorization: Token $TOK\" '{url}'");
+        let json = self
+            .vantage
+            .run_with_stdin(&remote, &format!("{}\n", self.token))
+            .context("querying NetBox prefixes from the vantage host")?;
+        parse_prefixes(&json)
+    }
+}
+
+/// Parse a NetBox `prefixes` list response into [`Subnet`]s.
+///
+/// How: read the `results` array; for each object take `prefix` (a CIDR string) and a
+/// label — the `description`, else the `role`/`vlan` display name, else empty. Anything
+/// that does not parse as a CIDR is skipped.
+///
+/// # Errors
+/// Fails if the body is not the expected JSON shape.
+pub fn parse_prefixes(json: &str) -> anyhow::Result<Vec<Subnet>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("NetBox prefixes response was not JSON")?;
+    let results = v
+        .get("results")
+        .and_then(|r| r.as_array())
+        .context("NetBox prefixes response had no `results` array")?;
+
+    let mut out = Vec::new();
+    for obj in results {
+        let Some(cidr_str) = obj.get("prefix").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let Ok(cidr) = Cidr::parse(cidr_str) else { continue };
+        // Prefer the description; fall back to the role or VLAN display name.
+        let name = obj
+            .get("description")
+            .and_then(|d| d.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| obj.get("role").and_then(|r| r.get("name")).and_then(|n| n.as_str()))
+            .or_else(|| obj.get("vlan").and_then(|vl| vl.get("display")).and_then(|n| n.as_str()))
+            .unwrap_or("")
+            .to_string();
+        out.push(Subnet { cidr, name });
+    }
+    Ok(out)
 }
 
 /// Parse a NetBox `ip-addresses` list response into per-address facts.
@@ -109,5 +169,22 @@ mod tests {
     fn rejects_non_json() {
         let range = Cidr::parse("10.87.3.0/24").unwrap();
         assert!(parse_ip_addresses("<html>403</html>", &range).is_err());
+    }
+
+    #[test]
+    fn parses_prefixes_with_labels() {
+        let json = r#"{
+            "count": 3,
+            "results": [
+                {"prefix": "10.87.0.0/20", "description": "LOFAR management"},
+                {"prefix": "10.87.3.0/24", "description": "", "role": {"name": "IPMI"}},
+                {"prefix": "not-a-cidr",   "description": "junk"}
+            ]
+        }"#;
+        let subs = parse_prefixes(json).unwrap();
+        assert_eq!(subs.len(), 2); // the junk prefix is skipped
+        assert_eq!(subs[0].cidr, Cidr::parse("10.87.0.0/20").unwrap());
+        assert_eq!(subs[0].name, "LOFAR management");
+        assert_eq!(subs[1].name, "IPMI"); // empty description → role name
     }
 }

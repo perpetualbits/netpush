@@ -214,6 +214,34 @@ pub fn counts_from_facts(total: u64, facts: &HashMap<Ipv4Addr, AddressFacts>) ->
     c
 }
 
+/// A subnet as NetBox defines it: a CIDR block with a human label. Unlike the map's
+/// Hilbert cells (fixed-length at each zoom level), real subnets have **varying** prefix
+/// lengths, so several may nest around a single address — the /26 you're in sits inside
+/// a /24 sits inside a /20.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subnet {
+    /// The block, e.g. `10.87.3.0/26`.
+    pub cidr: Cidr,
+    /// A human label (NetBox description, role, or VLAN name); may be empty.
+    pub name: String,
+}
+
+impl Subnet {
+    /// The most-specific (longest-prefix) subnet in `subnets` that contains `addr`, or
+    /// `None` if none covers it.
+    ///
+    /// How: keep every subnet whose block contains `addr`, then take the one with the
+    /// largest `prefix_len`. Longest-prefix-match is the standard rule — the tightest
+    /// real subnet an address sits in is the most useful "where am I".
+    #[must_use]
+    pub fn most_specific(subnets: &[Subnet], addr: Ipv4Addr) -> Option<&Subnet> {
+        subnets
+            .iter()
+            .filter(|s| s.cidr.contains(addr))
+            .max_by_key(|s| s.cidr.prefix_len)
+    }
+}
+
 /// An IPv4 CIDR block, e.g. `10.87.3.0/24`, stored as base address + prefix length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cidr {
@@ -348,6 +376,25 @@ impl Cidr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn most_specific_subnet_is_the_longest_prefix_match() {
+        let sub = |c: &str, n: &str| Subnet { cidr: Cidr::parse(c).unwrap(), name: n.into() };
+        let subs = vec![
+            sub("10.87.0.0/20", "mgmt"),
+            sub("10.87.3.0/24", "control"),
+            sub("10.87.3.0/26", "ipmi"),
+        ];
+        // .10 is in all three → the /26 wins (longest prefix).
+        let a = "10.87.3.10".parse().unwrap();
+        assert_eq!(Subnet::most_specific(&subs, a).unwrap().name, "ipmi");
+        // .200 is in the /24 and /20 but not the /26 → the /24 wins.
+        let b = "10.87.3.200".parse().unwrap();
+        assert_eq!(Subnet::most_specific(&subs, b).unwrap().name, "control");
+        // Outside every subnet → None.
+        let c = "10.99.0.1".parse().unwrap();
+        assert!(Subnet::most_specific(&subs, c).is_none());
+    }
 
     /// Small constructor to keep the known-case tests readable.
     fn facts(addr: &str, netbox: Option<Option<&str>>, ptr: Option<&str>, live: bool) -> AddressFacts {

@@ -7,8 +7,18 @@
 use anyhow::Context;
 
 use crate::config::Config;
-use crate::reconcile::{AddressFacts, Cidr};
+use crate::reconcile::{AddressFacts, Cidr, Subnet};
 use crate::sources::{self, dns::DnsSource, netbox::NetboxSource, probe::ProbeSource, FactSource, Vantage};
+
+/// One live gather's result: the per-address facts, plus the NetBox-defined subnets
+/// (variable-length) covering the range, used to label where the map cursor sits.
+#[derive(Debug, Clone, Default)]
+pub struct LiveData {
+    /// Reconcilable per-address facts from NetBox, DNS and the probe.
+    pub facts: Vec<AddressFacts>,
+    /// The real subnets (NetBox prefixes) inside the range.
+    pub subnets: Vec<Subnet>,
+}
 
 /// Gather NetBox + DNS + probe facts and merge them, fetching the token first.
 ///
@@ -19,7 +29,7 @@ use crate::sources::{self, dns::DnsSource, netbox::NetboxSource, probe::ProbeSou
 ///
 /// # Errors
 /// Propagates a token failure, or the first source that fails (SSH, HTTP, DNS).
-pub fn gather_live(range: &Cidr, cfg: &Config) -> anyhow::Result<Vec<AddressFacts>> {
+pub fn gather_live(range: &Cidr, cfg: &Config) -> anyhow::Result<LiveData> {
     let token = get_token(&cfg.token_pass)?;
     gather_live_with_token(range, cfg, token, |_, _| {})
 }
@@ -40,7 +50,7 @@ pub fn gather_live_with_token(
     cfg: &Config,
     token: String,
     on_progress: impl Fn(f32, &str),
-) -> anyhow::Result<Vec<AddressFacts>> {
+) -> anyhow::Result<LiveData> {
     let vantage = Vantage::new(&cfg.vantage);
     let netbox = NetboxSource { vantage: vantage.clone(), base_url: cfg.netbox_url.clone(), token };
     let dns = DnsSource { vantage: vantage.clone() };
@@ -48,6 +58,7 @@ pub fn gather_live_with_token(
 
     on_progress(0.0, "querying NetBox…");
     let nb = netbox.gather(range).context("NetBox source")?;
+    let subnets = netbox.gather_prefixes(range).context("NetBox prefixes")?;
 
     // DNS reverse sweep — the long pole. Map its per-address ticks onto 5 %–92 % of the
     // bar, updating only ~every percent so we don't spam a message per address.
@@ -66,7 +77,7 @@ pub fn gather_live_with_token(
     let live = probe.gather(range).context("probe source")?;
 
     on_progress(1.0, "merging…");
-    Ok(sources::merge(vec![nb, dns_facts, live]))
+    Ok(LiveData { facts: sources::merge(vec![nb, dns_facts, live]), subnets })
 }
 
 /// Fetch the NetBox token from `$NETPUSH_NETBOX_TOKEN`, else from `pass`.

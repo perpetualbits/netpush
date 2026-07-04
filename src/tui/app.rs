@@ -18,13 +18,13 @@ use super::focus::ListCursor;
 use super::theme::{s_dim, s_err, s_warn};
 use crate::config::Config;
 use crate::graph::DnsGraph;
-use crate::live;
+use crate::live::{self, LiveData};
 use crate::plan::{Allocation, Plan};
-use crate::reconcile::{self, AddressFacts, AddressRow, AddressStatus, Cidr, Counts};
+use crate::reconcile::{self, AddressFacts, AddressRow, AddressStatus, Cidr, Counts, Subnet};
 use crate::sources::Vantage;
 
 /// The result the live-gather thread sends back.
-type LiveResult = anyhow::Result<Vec<AddressFacts>>;
+type LiveResult = anyhow::Result<LiveData>;
 
 /// The result the allocate-apply thread sends back (a log of what it did).
 type ApplyResult = anyhow::Result<String>;
@@ -150,6 +150,9 @@ pub struct App {
     zoom_stack: Vec<ZoomFrame>,
     /// How the map colours cells by occupancy.
     pub density: DensityStyle,
+    /// NetBox-defined subnets (variable-length) covering the range — used to label the
+    /// real subnet the map cursor sits in. Empty until live data (or demo) supplies them.
+    pub subnets: Vec<Subnet>,
 
     /// Connection settings, used to gather live data on demand.
     pub cfg: Config,
@@ -210,6 +213,7 @@ impl App {
             map_order: 0,
             zoom_stack: Vec::new(),
             density: DensityStyle::Heatmap,
+            subnets: Vec::new(),
             cfg,
             loading: false,
             request_live: false,
@@ -280,6 +284,12 @@ impl App {
         self.status = Some((msg.into(), is_error));
     }
 
+    /// Seed the NetBox subnets (e.g. from the initial `--live` gather or the demo
+    /// fixture); the in-TUI `L` load refreshes them via [`apply_live`].
+    pub fn set_subnets(&mut self, subnets: Vec<Subnet>) {
+        self.subnets = subnets;
+    }
+
     /// Check whether the background gather has finished; apply or report its result.
     /// Called once per loop tick.
     pub fn poll_live(&mut self) {
@@ -293,7 +303,7 @@ impl App {
             return;
         };
         match rx.try_recv() {
-            Ok(Ok(facts)) => self.apply_live(facts),
+            Ok(Ok(data)) => self.apply_live(data),
             Ok(Err(e)) => {
                 self.status = Some((format!("live load failed: {e}"), true));
                 self.loading = false;
@@ -312,8 +322,9 @@ impl App {
     }
 
     /// Replace the current data with freshly gathered live facts and rebuild views.
-    fn apply_live(&mut self, facts: Vec<AddressFacts>) {
-        self.facts = Rc::new(facts.into_iter().map(|f| (f.addr, f)).collect());
+    fn apply_live(&mut self, data: LiveData) {
+        self.subnets = data.subnets;
+        self.facts = Rc::new(data.facts.into_iter().map(|f| (f.addr, f)).collect());
         self.counts = reconcile::counts_from_facts(self.total as u64, &self.facts);
         let (graph, canvas) = build_graph(&self.facts);
         self.graph = graph;
@@ -741,8 +752,17 @@ fn build_graph(facts: &HashMap<Ipv4Addr, AddressFacts>) -> (DnsGraph, GraphCanva
 ///
 /// # Errors
 /// Propagates terminal setup / draw errors.
-pub fn run(range: Cidr, facts: Vec<AddressFacts>, write_mode: bool, dry_run: bool, live: bool, cfg: Config) -> anyhow::Result<()> {
+pub fn run(
+    range: Cidr,
+    facts: Vec<AddressFacts>,
+    subnets: Vec<Subnet>,
+    write_mode: bool,
+    dry_run: bool,
+    live: bool,
+    cfg: Config,
+) -> anyhow::Result<()> {
     let mut app = App::new(range, facts, write_mode, dry_run, live, cfg);
+    app.set_subnets(subnets);
     let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     term.enter()?;
     let result = main_loop(&mut term, &mut app);
@@ -874,14 +894,18 @@ mod tests {
         let (range, demo) = fixture::demo();
         let mut app = App::new(range, demo, false, false, false, Config::default());
         assert!(!app.live);
-        app.apply_live(vec![AddressFacts {
-            addr: "10.87.3.5".parse().unwrap(),
-            netbox: None,
-            ptr: Some("thing.nfra.nl.".into()),
-            live: false,
-        }]);
+        app.apply_live(LiveData {
+            facts: vec![AddressFacts {
+                addr: "10.87.3.5".parse().unwrap(),
+                netbox: None,
+                ptr: Some("thing.nfra.nl.".into()),
+                live: false,
+            }],
+            subnets: vec![Subnet { cidr: Cidr::parse("10.87.3.0/26").unwrap(), name: "IPMI".into() }],
+        });
         assert!(app.live && !app.loading);
         assert_eq!(app.counts.dns_only, 1); // the one supplied PTR
+        assert_eq!(app.subnets.len(), 1); // subnets carried in from the gather
         assert!(app.status.as_ref().is_some_and(|(m, e)| m.contains("loaded") && !*e));
     }
 
@@ -1065,6 +1089,24 @@ mod tests {
         assert_eq!(app.density, DensityStyle::Shade);
         app.on_key(KeyCode::Char('s'));
         assert_eq!(app.density, DensityStyle::Heatmap);
+    }
+
+    #[test]
+    fn map_names_the_real_subnet_under_the_cursor() {
+        use mullion::{Buffer, Rect};
+        let range = Cidr::parse("10.87.3.0/24").unwrap();
+        let mut app = App::new(range, Vec::new(), false, false, false, Config::default());
+        app.set_subnets(vec![
+            Subnet { cidr: Cidr::parse("10.87.3.0/24").unwrap(), name: "control".into() },
+            Subnet { cidr: Cidr::parse("10.87.3.0/26").unwrap(), name: "IPMI".into() },
+        ]);
+        app.view = View::Map;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 88, 16));
+        crate::tui::map::screen(&mut buf, &mut app);
+        // The scope row (frame inner height − 2 = row 13 in an 88×16 buffer) names the
+        // most-specific NetBox subnet at the cursor: 10.87.3.0 → the /26, not the /24.
+        let scope: String = (0..88).map(|x| buf.get(x, 13).symbol.clone()).collect();
+        assert!(scope.contains("subnet: 10.87.3.0/26 (IPMI)"), "scope row: {scope:?}");
     }
 
     #[test]
