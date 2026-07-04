@@ -21,29 +21,52 @@ use crate::sources::{self, dns::DnsSource, netbox::NetboxSource, probe::ProbeSou
 /// Propagates a token failure, or the first source that fails (SSH, HTTP, DNS).
 pub fn gather_live(range: &Cidr, cfg: &Config) -> anyhow::Result<Vec<AddressFacts>> {
     let token = get_token(&cfg.token_pass)?;
-    gather_live_with_token(range, cfg, token)
+    gather_live_with_token(range, cfg, token, |_, _| {})
 }
 
-/// Gather and merge the sources using an already-fetched NetBox `token`.
+/// Gather and merge the sources using an already-fetched NetBox `token`, reporting
+/// progress through `on_progress(fraction, label)` as each stage runs.
 ///
 /// NetBox and DNS run on `cfg.vantage` (they need internal reachability); the ping
 /// probe runs on `cfg.probe_host`, which must sit on the target L2. This does no
 /// interactive prompting, so it is safe to run on a background thread while the TUI
-/// holds the terminal.
+/// holds the terminal. The DNS reverse sweep dominates the wall-clock, so it owns the
+/// bulk (5–92 %) of the bar and drives a determinate fraction from its per-address ticks.
 ///
 /// # Errors
 /// Propagates the first source that fails (SSH, HTTP, DNS).
-pub fn gather_live_with_token(range: &Cidr, cfg: &Config, token: String) -> anyhow::Result<Vec<AddressFacts>> {
+pub fn gather_live_with_token(
+    range: &Cidr,
+    cfg: &Config,
+    token: String,
+    on_progress: impl Fn(f32, &str),
+) -> anyhow::Result<Vec<AddressFacts>> {
     let vantage = Vantage::new(&cfg.vantage);
     let netbox = NetboxSource { vantage: vantage.clone(), base_url: cfg.netbox_url.clone(), token };
     let dns = DnsSource { vantage: vantage.clone() };
     let probe = ProbeSource { vantage: Vantage::new(&cfg.probe_host) };
 
-    Ok(sources::merge(vec![
-        netbox.gather(range).context("NetBox source")?,
-        dns.gather(range).context("DNS source")?,
-        probe.gather(range).context("probe source")?,
-    ]))
+    on_progress(0.0, "querying NetBox…");
+    let nb = netbox.gather(range).context("NetBox source")?;
+
+    // DNS reverse sweep — the long pole. Map its per-address ticks onto 5 %–92 % of the
+    // bar, updating only ~every percent so we don't spam a message per address.
+    let total = range.host_count().max(1);
+    let step = (total / 100).max(1);
+    let dns_facts = dns
+        .gather_with_progress(range, |done| {
+            if done % step == 0 || done == total {
+                let frac = 0.05 + 0.87 * (done as f32 / total as f32);
+                on_progress(frac, &format!("DNS reverse sweep {done}/{total}"));
+            }
+        })
+        .context("DNS source")?;
+
+    on_progress(0.93, "probing the wire…");
+    let live = probe.gather(range).context("probe source")?;
+
+    on_progress(1.0, "merging…");
+    Ok(sources::merge(vec![nb, dns_facts, live]))
 }
 
 /// Fetch the NetBox token from `$NETPUSH_NETBOX_TOKEN`, else from `pass`.

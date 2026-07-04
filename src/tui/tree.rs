@@ -134,7 +134,8 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
 
     // ── frame + header ──
     let title = format!("netpush — tree: {}/{}", app.range.base, app.range.prefix_len);
-    let area = super::draw::frame(buf, full, &title, s_title(), Some(super::draw::data_badge(app)));
+    let prog = app.progress.as_ref().map(|(f, l)| (*f, l.as_str()));
+    let area = super::draw::frame(buf, full, &title, s_title(), Some(super::draw::data_badge(app)), prog);
     btxt(buf, area.x, area.y, "network → cluster → host", s_dim());
 
     // ── body: the visible slice of the tree ──

@@ -27,7 +27,14 @@ pub fn btxt(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style) {
 /// The bookended-gap look is mullion's socket convention: the border line is capped by
 /// `┤`/`├` on each side of an opening, here used to seat a caption in the frame. The
 /// same gaps can later carry a progress bar or other status.
-pub fn frame(buf: &mut Buffer, area: Rect, title: &str, title_style: Style, right: Option<(&str, Style)>) -> Rect {
+pub fn frame(
+    buf: &mut Buffer,
+    area: Rect,
+    title: &str,
+    title_style: Style,
+    right: Option<(&str, Style)>,
+    progress: Option<(f32, &str)>,
+) -> Rect {
     let bs = BorderStyle { weight: LineWeight::Light, corners: CornerStyle::Rounded, style: s_border() };
     draw_box(buf, area, Borders::ALL, &bs);
     let (lcap, rcap) = bookends(Side::Top);
@@ -50,7 +57,38 @@ pub fn frame(buf: &mut Buffer, area: Rect, title: &str, title_style: Style, righ
         }
     }
 
+    // Progress bar seated in the bottom edge, while a live gather runs.
+    if let Some((frac, label)) = progress {
+        draw_bottom_progress(buf, area, frac, label);
+    }
+
     Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2))
+}
+
+/// Draw a determinate progress bar `┤ label ████░░░░ 42% ├` into the bottom edge of
+/// `area`, filled to `frac` (0–1). A no-op if the frame is too narrow to hold it.
+fn draw_bottom_progress(buf: &mut Buffer, area: Rect, frac: f32, label: &str) {
+    let frac = frac.clamp(0.0, 1.0);
+    let label_w = label.chars().count() as u16;
+    // Reserve room for the caps, label, percentage, and spacing; give the rest to the bar.
+    let overhead = label_w + 12;
+    if area.width < overhead + 8 || area.height < 3 {
+        return;
+    }
+    let barw = (area.width - overhead - 6).min(28);
+    let filled = (frac * f32::from(barw)).round() as u16;
+    let pct = (frac * 100.0).round() as u16;
+    let (lcap, rcap) = bookends(Side::Bottom);
+    let y = area.y + area.height - 1;
+
+    let mut x = buf.set_string(area.x + 2, y, lcap, s_border());
+    x = buf.set_string(x, y, &format!(" {label} "), s_dim());
+    for i in 0..barw {
+        let (ch, st) = if i < filled { ("█", s_ok()) } else { ("░", s_dim()) };
+        x = buf.set_string(x, y, ch, st);
+    }
+    x = buf.set_string(x, y, &format!(" {pct:>3}% "), s_accent());
+    buf.set_string(x, y, rcap, s_border());
 }
 
 /// The data-source badge: `LOADING…` while a live gather runs, else `LIVE` or `DEMO`.
@@ -108,7 +146,8 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     // ── outer frame: title + mode badge live in the border; content goes inside ──
     let mode = app.mode_label();
     let title = format!("netpush — {}/{}", app.range.base, app.range.prefix_len);
-    let area = frame(buf, full, &title, s_title(), Some((mode.0, mode.1)));
+    let prog = app.progress.as_ref().map(|(f, l)| (*f, l.as_str()));
+    let area = frame(buf, full, &title, s_title(), Some((mode.0, mode.1)), prog);
 
     // ── status row (inside the frame): data-source badge, then any status message ──
     let (data, data_style) = data_badge(app);

@@ -158,6 +158,11 @@ pub struct App {
     /// Set by the `L` key; the event loop services it (fetching the token with the
     /// TUI suspended) and clears it.
     request_live: bool,
+    /// Latest live-gather progress `(fraction 0–1, label)`, shown as a bar in the
+    /// frame while `loading`. `None` when no gather is running.
+    pub progress: Option<(f32, String)>,
+    /// Channel carrying progress updates from the background gather thread.
+    progress_rx: Option<mpsc::Receiver<(f32, String)>>,
     /// `true` while a background allocate-apply is running.
     pub applying: bool,
     /// A short status line (message, is_error) shown in the header.
@@ -208,6 +213,8 @@ impl App {
             cfg,
             loading: false,
             request_live: false,
+            progress: None,
+            progress_rx: None,
             applying: false,
             status: None,
             alloc: None,
@@ -244,13 +251,19 @@ impl App {
             return;
         }
         let (tx, rx) = mpsc::channel();
+        let (ptx, prx) = mpsc::channel(); // progress updates
         let cfg = self.cfg.clone();
         let range = self.range;
         std::thread::spawn(move || {
-            let _ = tx.send(live::gather_live_with_token(&range, &cfg, token));
+            let progress = |frac: f32, label: &str| {
+                let _ = ptx.send((frac, label.to_string()));
+            };
+            let _ = tx.send(live::gather_live_with_token(&range, &cfg, token, progress));
         });
         self.live_rx = Some(rx);
+        self.progress_rx = Some(prx);
         self.loading = true;
+        self.progress = Some((0.0, "starting…".to_string()));
         self.status = Some(("gathering live data…".to_string(), false));
     }
 
@@ -270,6 +283,12 @@ impl App {
     /// Check whether the background gather has finished; apply or report its result.
     /// Called once per loop tick.
     pub fn poll_live(&mut self) {
+        // Drain any progress updates first, keeping the latest for the bar.
+        if let Some(prx) = &self.progress_rx {
+            while let Ok(update) = prx.try_recv() {
+                self.progress = Some(update);
+            }
+        }
         let Some(rx) = &self.live_rx else {
             return;
         };
@@ -279,11 +298,15 @@ impl App {
                 self.status = Some((format!("live load failed: {e}"), true));
                 self.loading = false;
                 self.live_rx = None;
+                self.progress = None;
+                self.progress_rx = None;
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.loading = false;
                 self.live_rx = None;
+                self.progress = None;
+                self.progress_rx = None;
             }
         }
     }
@@ -298,6 +321,8 @@ impl App {
         self.live = true;
         self.loading = false;
         self.live_rx = None;
+        self.progress = None;
+        self.progress_rx = None;
         self.pan = (0, 0);
         self.cur.clamp(self.total);
         self.status = Some(("live data loaded".to_string(), false));
@@ -968,6 +993,25 @@ mod tests {
             assert!(top.contains("netpush"), "{view:?} title in the top border: {top:?}");
             assert!(top.contains('┤') && top.contains('├'), "{view:?} bookend caps");
         }
+    }
+
+    #[test]
+    fn loading_draws_a_progress_bar_in_the_bottom_border() {
+        use mullion::{Buffer, Rect};
+        let (range, facts) = fixture::demo();
+        let mut app = App::new(range, facts, false, false, false, Config::default());
+        app.loading = true;
+        app.progress = Some((0.5, "DNS reverse sweep 2000/4000".into()));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 90, 24));
+        draw::screen(&mut buf, &mut app);
+        let bottom: String = (0..90).map(|x| buf.get(x, 23).symbol.clone()).collect();
+        assert!(bottom.contains("DNS reverse sweep"), "bar label in bottom border: {bottom:?}");
+        assert!(bottom.contains("50%"), "percentage shown: {bottom:?}");
+        assert!(bottom.contains('█') && bottom.contains('░'), "half-filled bar: {bottom:?}");
+        // The table shows its LOADING badge on the inner status row (row 1); its top
+        // border carries the mode badge instead.
+        let status_row: String = (0..90).map(|x| buf.get(x, 1).symbol.clone()).collect();
+        assert!(status_row.contains("LOADING"), "loading badge on status row: {status_row:?}");
     }
 
     #[test]

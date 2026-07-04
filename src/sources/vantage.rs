@@ -5,7 +5,7 @@
 //! the ASTRON network, so every live query is executed here via SSH, reusing the
 //! user's `~/.ssh/config` (bastion jump, keys, etc.).
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context};
@@ -39,6 +39,42 @@ impl Vantage {
     /// Fails if ssh cannot be spawned, or the remote command exits non-zero.
     pub fn run_with_stdin(&self, remote_cmd: &str, stdin: &str) -> anyhow::Result<String> {
         self.run_inner(remote_cmd, Some(stdin))
+    }
+
+    /// Run `remote_cmd` and call `on_line` for each line of stdout **as it arrives**,
+    /// rather than collecting all output at the end. Used to drive a live progress bar:
+    /// the remote sweep emits a marker per address, and the caller counts them.
+    ///
+    /// # Errors
+    /// Fails if ssh cannot be spawned, or the remote command exits non-zero.
+    pub fn run_streaming(&self, remote_cmd: &str, mut on_line: impl FnMut(&str)) -> anyhow::Result<()> {
+        let mut child = Command::new("ssh")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("ConnectTimeout=20")
+            .arg(&self.host)
+            .arg(remote_cmd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawning ssh to {}", self.host))?;
+
+        let stdout = child.stdout.take().context("ssh child had no stdout")?;
+        for line in BufReader::new(stdout).lines() {
+            on_line(&line.context("reading ssh stdout")?);
+        }
+
+        let status = child.wait().context("waiting for ssh")?;
+        if !status.success() {
+            let mut err = String::new();
+            if let Some(mut se) = child.stderr.take() {
+                let _ = se.read_to_string(&mut err);
+            }
+            bail!("ssh {} failed: {}", self.host, err.trim());
+        }
+        Ok(())
     }
 
     /// Shared implementation: `ssh -o BatchMode=yes <host> <remote_cmd>`, optionally

@@ -168,7 +168,8 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
 
     // ── frame (title + data badge in the border) ──
     let title = format!("netpush — map: {}/{}", app.range.base, app.range.prefix_len);
-    let area = super::draw::frame(buf, full, &title, s_title(), Some(super::draw::data_badge(app)));
+    let prog = app.progress.as_ref().map(|(f, l)| (*f, l.as_str()));
+    let area = super::draw::frame(buf, full, &title, s_title(), Some(super::draw::data_badge(app)), prog);
 
     // ── grid ── (row 0: legend; bottom three rows: cursor info, scope, footer)
     let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(4));

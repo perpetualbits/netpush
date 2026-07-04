@@ -17,19 +17,43 @@ pub struct DnsSource {
 
 impl FactSource for DnsSource {
     fn gather(&self, range: &Cidr) -> anyhow::Result<Vec<AddressFacts>> {
+        self.gather_with_progress(range, |_done| {})
+    }
+}
+
+impl DnsSource {
+    /// Reverse-resolve every host, calling `on_tick(done)` after each address is
+    /// processed (so a caller can show a determinate progress bar), and return the PTR
+    /// facts found.
+    ///
+    /// The sweep runs in parallel with bounded fan-out. A serial `for` loop did one
+    /// blocking `host` per address — for a /20 that is ~4000 lookups back-to-back, each
+    /// waiting out a timeout when there is no PTR, so it took minutes. `xargs -P` runs up
+    /// to 128 at once (bounding load on the resolver) and `host -W1` caps each lookup at
+    /// ~1 s, so the whole sweep finishes in tens of seconds. Each worker prints `T` when
+    /// done (a progress tick, streamed back and counted) and `R <ip> <name>` when a PTR
+    /// exists; both lines are short enough to be written atomically to the pipe. `$0`
+    /// inside the `sh -c` body is the address xargs handed it.
+    ///
+    /// # Errors
+    /// Propagates SSH failures.
+    pub fn gather_with_progress(&self, range: &Cidr, mut on_tick: impl FnMut(u64)) -> anyhow::Result<Vec<AddressFacts>> {
         let ips = host_list(range);
-        // Reverse-resolve in parallel with bounded fan-out. A serial `for` loop does one
-        // blocking `host` per address — for a /20 that is ~4000 lookups back-to-back,
-        // each waiting out a timeout when there is no PTR, so it took minutes. `xargs -P`
-        // runs up to 128 at once (bounding load on the resolver) and `host -W1` caps each
-        // lookup at ~1 s, so the whole sweep finishes in tens of seconds. `sed` pulls the
-        // name after "pointer "; addresses without a PTR print nothing. `$0` inside the
-        // `sh -c` body is the address xargs handed it.
         let remote = format!(
-            "printf '%s\\n' {ips} | xargs -P128 -n1 sh -c 'h=$(host -W1 \"$0\" 2>/dev/null | sed -n \"s/.*pointer //p\"); [ -n \"$h\" ] && echo \"$0 $h\"'"
+            "printf '%s\\n' {ips} | xargs -P128 -n1 sh -c 'h=$(host -W1 \"$0\" 2>/dev/null | sed -n \"s/.*pointer //p\"); printf \"T\\n\"; [ -n \"$h\" ] && printf \"R %s %s\\n\" \"$0\" \"$h\"'"
         );
-        let out = self.vantage.run(&remote)?;
-        Ok(parse_ptrs(&out))
+        let mut done = 0u64;
+        let mut results = String::new();
+        self.vantage.run_streaming(&remote, |line| {
+            if line == "T" {
+                done += 1;
+                on_tick(done);
+            } else if let Some(rest) = line.strip_prefix("R ") {
+                results.push_str(rest);
+                results.push('\n');
+            }
+        })?;
+        Ok(parse_ptrs(&results))
     }
 }
 
