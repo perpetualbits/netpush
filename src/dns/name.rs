@@ -7,7 +7,7 @@
 //! [`DnsName::parent`], and those references become the wires.
 
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 /// A DNS name held as labels, most-specific first, lower-cased, no trailing dot.
 /// e.g. `dop370-ipmi.nfra.nl` → `["dop370-ipmi", "nfra", "nl"]`.
@@ -86,13 +86,23 @@ impl fmt::Display for DnsName {
     }
 }
 
-/// The `in-addr.arpa` reverse name for an IPv4 address, e.g. `10.87.3.69` →
-/// `69.3.87.10.in-addr.arpa`. The octets are reversed because DNS delegates the
-/// reverse tree most-significant-last, mirroring how forward names nest.
+/// The reverse-DNS name for an address: `in-addr.arpa` for IPv4 (octets reversed,
+/// e.g. `10.87.3.69` → `69.3.87.10.in-addr.arpa`) or `ip6.arpa` for IPv6 (all 32
+/// nibbles reversed). The labels run most-significant-last because DNS delegates the
+/// reverse tree that way, mirroring how forward names nest.
 #[must_use]
-pub fn reverse_ptr(addr: Ipv4Addr) -> DnsName {
-    let o = addr.octets();
-    DnsName::parse(&format!("{}.{}.{}.{}.in-addr.arpa", o[3], o[2], o[1], o[0]))
+pub fn reverse_ptr(addr: IpAddr) -> DnsName {
+    match addr {
+        IpAddr::V4(a) => {
+            let o = a.octets();
+            DnsName::parse(&format!("{}.{}.{}.{}.in-addr.arpa", o[3], o[2], o[1], o[0]))
+        }
+        IpAddr::V6(a) => {
+            let v = u128::from(a);
+            let nibbles: Vec<String> = (0..32).map(|k| format!("{:x}", (v >> (4 * k)) & 0xf)).collect();
+            DnsName::parse(&format!("{}.ip6.arpa", nibbles.join(".")))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -132,5 +142,13 @@ mod tests {
             reverse_ptr("10.87.3.69".parse().unwrap()).to_string(),
             "69.3.87.10.in-addr.arpa"
         );
+    }
+
+    #[test]
+    fn reverse_name_ipv6_is_nibble_reversed_ip6_arpa() {
+        let n = reverse_ptr("2001:db8::1".parse().unwrap());
+        // 32 nibbles, least-significant first, then ip6.arpa.
+        assert!(n.to_string().ends_with(".ip6.arpa"));
+        assert_eq!(n.to_string(), format!("1.{}8.b.d.0.1.0.0.2.ip6.arpa", "0.".repeat(23)));
     }
 }

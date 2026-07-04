@@ -18,7 +18,7 @@ mod reconcile;
 mod sources;
 mod tui;
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -137,23 +137,29 @@ fn main() -> anyhow::Result<()> {
 /// a non-free target. Without `--live` the free-check runs against offline/demo data,
 /// so real allocations should pass `--live`.
 fn run_allocation(range: Cidr, args: &Args, cfg: &Config, facts: &[AddressFacts], fqdn: String) -> anyhow::Result<()> {
-    let addr: Ipv4Addr = args
+    let addr: IpAddr = args
         .addr
         .as_deref()
         .context("--allocate requires --addr <IP>")?
         .parse()
         .context("invalid --addr")?;
     anyhow::ensure!(
-        range.contains(std::net::IpAddr::V4(addr)),
+        range.contains(addr),
         "{addr} is not inside {}/{}",
         range.base,
         range.prefix_len
     );
 
-    let rows = reconcile::reconcile(range, facts);
+    // The free-check needs only the target address's current row — never materialize the
+    // whole range (a v6 /48 is 2^80 addresses). Build that one row from the bounded facts.
+    let target = facts
+        .iter()
+        .find(|f| f.addr == addr)
+        .map(reconcile::row_from_facts)
+        .unwrap_or(reconcile::AddressRow { addr, status: reconcile::AddressStatus::Free, name: None });
     let prefix_len = args.alloc_prefix.unwrap_or(range.prefix_len);
     let alloc = Allocation { addr, prefix_len, fqdn };
-    let plan = Plan::for_allocation(alloc, &cfg.netbox_url, Some(&rows))?;
+    let plan = Plan::for_allocation(alloc, &cfg.netbox_url, Some(&[target]))?;
 
     if !args.live {
         eprintln!("note: free-check used offline data; pass --live to check against reality.\n");

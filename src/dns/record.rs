@@ -60,6 +60,13 @@ impl Record {
         Record { owner, ttl: None, rtype: RecordType::A, rdata: addr.to_string() }
     }
 
+    /// A forward address record for either family — `A` for IPv4, `AAAA` for IPv6.
+    #[must_use]
+    pub fn address(owner: DnsName, addr: std::net::IpAddr) -> Record {
+        let rtype = if addr.is_ipv6() { RecordType::Aaaa } else { RecordType::A };
+        Record { owner, ttl: None, rtype, rdata: addr.to_string() }
+    }
+
     /// A PTR record pointing at `target`.
     #[must_use]
     pub fn ptr(owner: DnsName, target: &DnsName) -> Record {

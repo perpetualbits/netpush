@@ -504,12 +504,7 @@ impl App {
             self.status = Some(("type a name first".to_string(), true));
             return;
         }
-        // The allocate/write path (A record + reverse PTR) is IPv4-only for now.
-        let IpAddr::V4(v4) = addr else {
-            self.status = Some(("IPv6 allocation is not supported yet".to_string(), true));
-            return;
-        };
-        let alloc = Allocation { addr: v4, prefix_len: self.range.prefix_len, fqdn };
+        let alloc = Allocation { addr, prefix_len: self.range.prefix_len, fqdn };
         // The plan only needs the target address's current row for its free-check.
         let target = self
             .facts

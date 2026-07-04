@@ -147,8 +147,10 @@ pub fn reconcile_at(range: Cidr, facts: &HashMap<IpAddr, AddressFacts>, index: u
 /// Build the reconciled table for every usable host address in `range`.
 ///
 /// How: index `facts` by address, then walk every host address in the CIDR;
-/// addresses with no facts default to `Free`. Materializes the whole range, so it is
-/// for small ranges and tests — large ranges use [`reconcile_at`] lazily.
+/// addresses with no facts default to `Free`. Materializes the whole range, so it is a
+/// **test-only** oracle for [`reconcile_at`]; production code reconciles lazily
+/// (a v6 range would be `2^128` rows).
+#[cfg(test)]
 #[must_use]
 pub fn reconcile(range: Cidr, facts: &[AddressFacts]) -> Vec<AddressRow> {
     let by_addr: HashMap<IpAddr, &AddressFacts> =

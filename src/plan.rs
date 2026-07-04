@@ -12,7 +12,7 @@
 //! happens from the binary, behind `--write`, and it skips any step still flagged
 //! for review.
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 use crate::dns::{reverse_ptr, DnsName, Record, Zone};
 use crate::reconcile::{AddressRow, AddressStatus};
@@ -21,8 +21,8 @@ use crate::sources::Vantage;
 /// The end state we want: `addr` should exist as `fqdn`, on a `/prefix_len` network.
 #[derive(Debug, Clone)]
 pub struct Allocation {
-    /// The address to allocate.
-    pub addr: Ipv4Addr,
+    /// The address to allocate (IPv4 or IPv6).
+    pub addr: IpAddr,
     /// The network prefix length (for NetBox's `address` field).
     pub prefix_len: u8,
     /// The fully-qualified name, e.g. `"dop370-ipmi.nfra.nl"`.
@@ -136,13 +136,14 @@ impl Plan {
             review: false,
         };
 
-        // 2) Forward A record on dns1 — matured safe edit (validate a copy, then swap).
+        // 2) Forward address record on dns1 — A for IPv4, AAAA for IPv6. Matured safe
+        //    edit (validate a copy, then swap).
         let fzone = Zone::nfra_forward();
-        let a_rec = Record::a(fqdn.clone(), alloc.addr);
+        let a_rec = Record::address(fqdn.clone(), alloc.addr);
         let forward = Action {
             target: Target::DnsForward,
             host: Some(fzone.server.clone()),
-            summary: format!("add A {} -> {} in {}", fqdn, alloc.addr, fzone.origin),
+            summary: format!("add {} {} -> {} in {}", a_rec.rtype.token(), fqdn, alloc.addr, fzone.origin),
             detail: a_rec.zone_line(&fzone.origin),
             script: fzone.add_record_script(&a_rec),
             needs_token: false,
@@ -150,17 +151,23 @@ impl Plan {
             review: !fzone.is_editable(),
         };
 
-        // 3) Reverse PTR — the 10.in-addr.arpa zone is mastered on ntserver1, a
-        // WINDOWS DNS server owned by another team: no SSH/BIND, RDP-only, not
-        // automatable. So this is a MANUAL hand-off — netpush emits the exact record
-        // and where it goes, for a human to add. It is never auto-applied.
+        // 3) Reverse PTR — the IPv4 10.in-addr.arpa zone is mastered on ntserver1, a
+        // WINDOWS DNS server owned by another team (no SSH/BIND, RDP-only, not
+        // automatable); the IPv6 ip6.arpa zone is likewise mastered elsewhere. Either
+        // way this is a MANUAL hand-off — netpush emits the exact record and where it
+        // goes, for a human to add. It is never auto-applied.
         let ptr_rec = Record::ptr(reverse_ptr(alloc.addr), &fqdn);
+        let (rev_host, rev_zone) = if alloc.addr.is_ipv6() {
+            (None, "ip6.arpa")
+        } else {
+            (Some("ntserver1.nfra.nl".to_string()), "10.in-addr.arpa")
+        };
         let reverse = Action {
             target: Target::DnsReverse,
-            host: Some("ntserver1.nfra.nl".to_string()),
-            summary: format!("add PTR {} -> {} (Windows DNS, apply via RDP)", alloc.addr, alloc.fqdn),
-            detail: format!("{ptr_rec}   (add to the 10.in-addr.arpa zone on ntserver1)"),
-            script: "manual step — apply by hand in the Windows DNS Manager on ntserver1 (RDP); not automatable".to_string(),
+            host: rev_host,
+            summary: format!("add PTR {} -> {} (reverse DNS, apply by hand)", alloc.addr, alloc.fqdn),
+            detail: format!("{ptr_rec}   (add to the {rev_zone} reverse zone by hand)"),
+            script: format!("manual step — add this PTR to the {rev_zone} zone by hand; not automatable from here"),
             needs_token: false,
             manual: true,
             review: true,
@@ -234,6 +241,20 @@ mod tests {
 
     fn alloc() -> Allocation {
         Allocation { addr: "10.87.3.69".parse().unwrap(), prefix_len: 20, fqdn: "dop370-ipmi.nfra.nl".into() }
+    }
+
+    #[test]
+    fn ipv6_allocation_uses_aaaa_and_ip6_arpa() {
+        let alloc = Allocation { addr: "2001:db8::100".parse().unwrap(), prefix_len: 48, fqdn: "newhost.nfra.nl".into() };
+        let plan = Plan::for_allocation(alloc, "https://netbox.astron.nl", None).unwrap();
+        let text = plan.preview();
+        // NetBox carries the v6 address + prefix.
+        assert!(text.contains(r#""address":"2001:db8::100/48""#), "{text}");
+        // Forward record is AAAA, not A.
+        assert!(text.contains("AAAA") && text.contains("2001:db8::100"), "{text}");
+        // Reverse PTR is an ip6.arpa name, still a manual hand-off.
+        assert!(text.contains("ip6.arpa"), "{text}");
+        assert!(plan.actions[2].manual);
     }
 
     #[test]
