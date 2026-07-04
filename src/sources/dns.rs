@@ -5,7 +5,7 @@
 //! We reverse-resolve every host on the vantage (its resolver knows the internal
 //! zones), in parallel with bounded fan-out, and collect the answers.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::{FactSource, Vantage};
 use crate::reconcile::{AddressFacts, Cidr};
@@ -49,18 +49,19 @@ impl DnsSource {
         range: &Cidr,
         mut on_progress: impl FnMut(f32, &str),
     ) -> anyhow::Result<Vec<AddressFacts>> {
-        // A per-address sweep needs to enumerate the range; a huge (IPv6) range cannot be
-        // enumerated. IPv6 reverse-by-AXFR (`ip6.arpa`) is a follow-up, so for now such a
-        // range gets no reverse DNS here and relies on NetBox alone.
-        if !range.is_enumerable() {
-            return Ok(Vec::new());
-        }
-        // AXFR is the light path (IPv4 `in-addr.arpa` only for now) — but only if the
-        // server actually lets us transfer; if not, quietly fall back to the sweep.
-        if !self.axfr_server.is_empty() && !range.is_v6() {
+        // AXFR is the light path (and the *only* reverse path for a huge IPv6 range, which
+        // can't be swept address by address): `in-addr.arpa` for v4, `ip6.arpa` for v6.
+        // Only if the server actually lets us transfer, though — otherwise fall through.
+        if !self.axfr_server.is_empty() {
             if let Some(facts) = self.try_axfr(range, &mut on_progress)? {
                 return Ok(facts);
             }
+        }
+        // No AXFR (unset or refused): fall back to a per-address sweep, which needs to
+        // enumerate the range — impossible for a huge IPv6 block, so that gets nothing
+        // here and relies on NetBox alone.
+        if !range.is_enumerable() {
+            return Ok(Vec::new());
         }
         self.sweep(range, on_progress)
     }
@@ -155,16 +156,21 @@ impl DnsSource {
     }
 }
 
-/// The `/24` reverse zones (`c.b.a.in-addr.arpa`) that `range` overlaps, aligned down to
-/// `/24` boundaries. Empty when the range would need more than [`MAX_ZONES`] zones (the
-/// signal to skip AXFR and sweep instead).
+/// The reverse zones (`in-addr.arpa` for IPv4, `ip6.arpa` for IPv6) that `range`
+/// overlaps, aligned to the zone boundary — `/24` for v4, the nibble boundary for v6.
+/// Empty when the range would need more than [`MAX_ZONES`] zones (skip AXFR, sweep
+/// instead — or, for a huge v6 range with no zone, fall back to NetBox).
 fn reverse_zones(range: &Cidr) -> Vec<String> {
-    // IPv4 `in-addr.arpa` only; IPv6 `ip6.arpa` transfer is a follow-up.
-    let IpAddr::V4(net) = range.network() else {
-        return Vec::new();
-    };
+    match range.network() {
+        IpAddr::V4(net) => reverse_zones_v4(net, range.block_len()),
+        IpAddr::V6(net) => reverse_zones_v6(net, u32::from(range.prefix_len)),
+    }
+}
+
+/// IPv4 `/24` `in-addr.arpa` zones covering `block_len` addresses from `net`.
+fn reverse_zones_v4(net: Ipv4Addr, block_len: u128) -> Vec<String> {
     let start = u64::from(u32::from(net));
-    let end = start + range.block_len() as u64; // exclusive (v4 block_len fits u64)
+    let end = start + block_len as u64; // exclusive (v4 block_len fits u64)
     let first = start & !0xFF; // align down to a /24 boundary
     let count = (end - first).div_ceil(256) as usize;
     if count > MAX_ZONES {
@@ -178,15 +184,51 @@ fn reverse_zones(range: &Cidr) -> Vec<String> {
         .collect()
 }
 
-/// Map a reverse-DNS owner name (`1.3.87.10.in-addr.arpa.`) back to its address
-/// (`10.87.3.1`) — the four labels are the octets in reverse.
-fn ptr_owner_to_ip(owner: &str) -> Option<std::net::Ipv4Addr> {
-    let labels = owner.trim_end_matches('.').strip_suffix(".in-addr.arpa")?;
-    let parts: Vec<u8> = labels.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
-    match parts[..] {
-        [d, c, b, a] => Some(std::net::Ipv4Addr::new(a, b, c, d)),
-        _ => None,
+/// IPv6 `ip6.arpa` zones covering a `/prefix` from `net`, cut at the nibble boundary at
+/// or below the prefix (so a `/48`, `/56` or `/64` is exactly one zone; a non-nibble
+/// prefix rounds up and spans a few). AXFR of such a zone returns only the PTRs that
+/// actually exist, so the transfer size is bounded by reality regardless of the zone's
+/// span. Each zone name is the prefix's nibbles, least-significant first, then `ip6.arpa`.
+fn reverse_zones_v6(net: Ipv6Addr, prefix: u32) -> Vec<String> {
+    let nibbles = prefix.div_ceil(4); // zone depth in nibbles
+    let zone_bits = nibbles * 4; // aligned prefix
+    let count = 1u128 << (zone_bits - prefix); // zones needed to cover a non-nibble prefix
+    if count as usize > MAX_ZONES {
+        return Vec::new();
     }
+    let base = u128::from(net) >> (128 - zone_bits); // the top `zone_bits` as an integer
+    (0..count)
+        .map(|i| {
+            let z = base + i;
+            let labels: Vec<String> = (0..nibbles).map(|k| format!("{:x}", (z >> (4 * k)) & 0xf)).collect();
+            format!("{}.ip6.arpa", labels.join("."))
+        })
+        .collect()
+}
+
+/// Map a reverse-DNS owner name back to its address: `1.3.87.10.in-addr.arpa.` →
+/// `10.87.3.1` (four octets reversed), or a full 32-nibble `…​.ip6.arpa.` → its IPv6
+/// address (nibbles are least-significant first). Non-host owners (short zone/delegation
+/// names) return `None`.
+fn ptr_owner_to_ip(owner: &str) -> Option<IpAddr> {
+    let o = owner.trim_end_matches('.');
+    if let Some(labels) = o.strip_suffix(".in-addr.arpa") {
+        let parts: Vec<u8> = labels.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
+        return match parts[..] {
+            [d, c, b, a] => Some(IpAddr::V4(Ipv4Addr::new(a, b, c, d))),
+            _ => None,
+        };
+    }
+    if let Some(labels) = o.strip_suffix(".ip6.arpa") {
+        let nibs: Vec<u8> =
+            labels.split('.').map(|p| u8::from_str_radix(p, 16).ok().filter(|n| *n < 16)).collect::<Option<_>>()?;
+        if nibs.len() != 32 {
+            return None; // only a full host PTR maps to an address
+        }
+        let v = nibs.iter().enumerate().fold(0u128, |acc, (k, &n)| acc | (u128::from(n) << (4 * k)));
+        return Some(IpAddr::V6(Ipv6Addr::from(v)));
+    }
+    None
 }
 
 /// Parse `dig +answer` PTR lines from an AXFR into facts, keeping only those in `range`.
@@ -204,10 +246,9 @@ pub fn parse_axfr(output: &str, range: &Cidr) -> Vec<AddressFacts> {
         let (Some(owner), Some(target)) = (f.first(), f.get(pi + 1)) else {
             continue;
         };
-        let Some(v4) = ptr_owner_to_ip(owner) else {
+        let Some(addr) = ptr_owner_to_ip(owner) else {
             continue;
         };
-        let addr = IpAddr::V4(v4);
         if !range.contains(addr) {
             continue;
         }
@@ -303,5 +344,42 @@ garbage line without ip
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].addr, std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 87, 3, 68)));
         assert_eq!(facts[0].ptr.as_deref(), Some("dop21-ipmi.nfra.nl."));
+    }
+
+    #[test]
+    fn ipv6_reverse_zone_is_the_nibble_prefix() {
+        // 2001:db8:aaaa::/48 → the 12 leading nibbles, least-significant first, + ip6.arpa.
+        assert_eq!(
+            reverse_zones(&Cidr::parse("2001:db8:aaaa::/48").unwrap()),
+            vec!["a.a.a.a.8.b.d.0.1.0.0.2.ip6.arpa"]
+        );
+        assert_eq!(reverse_zones(&Cidr::parse("2001:db8:0:1::/64").unwrap()).len(), 1); // one 16-nibble zone
+        assert_eq!(reverse_zones(&Cidr::parse("2001:db8:aaaa::/47").unwrap()).len(), 2); // non-nibble → 2 zones
+    }
+
+    /// The `ip6.arpa` owner name for `2001:db8::<low>`: nibble `low`, then 23 zeros, then
+    /// the 8 nibbles of `2001:0db8` least-significant first.
+    fn ip6_owner(low: char) -> String {
+        format!("{low}.{}8.b.d.0.1.0.0.2.ip6.arpa.", "0.".repeat(23))
+    }
+
+    #[test]
+    fn ptr_owner_maps_ip6_arpa_back_to_v6() {
+        assert_eq!(ptr_owner_to_ip(&ip6_owner('1')).unwrap(), "2001:db8::1".parse::<IpAddr>().unwrap());
+        assert!(ptr_owner_to_ip("a.a.a.a.8.b.d.0.1.0.0.2.ip6.arpa.").is_none()); // short zone name, not a host
+    }
+
+    #[test]
+    fn parses_ipv6_axfr_answer_lines() {
+        let range = Cidr::parse("2001:db8::/48").unwrap();
+        let answer = format!(
+            "{} 3600 IN PTR host1.nfra.nl.\n{} 3600 IN PTR host2.nfra.nl.",
+            ip6_owner('1'),
+            ip6_owner('2')
+        );
+        let facts = parse_axfr(&answer, &range);
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].addr, "2001:db8::1".parse::<IpAddr>().unwrap());
+        assert_eq!(facts[0].ptr.as_deref(), Some("host1.nfra.nl."));
     }
 }
