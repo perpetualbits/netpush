@@ -241,37 +241,61 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     btxt(buf, area.x + 34, hy, "NAME", s_dim());
 
     // ── body ──
-    let body = Rect::new(area.x, area.y + 3, area.width, area.height.saturating_sub(4));
-    let len = app.total;
+    // Reserve the last body row for a "sparse" note when we can't list every address.
+    let sparse = app.table_sparse();
+    let note_rows = u16::from(sparse);
+    let body = Rect::new(area.x, area.y + 3, area.width, area.height.saturating_sub(4 + note_rows));
+    let len = app.table_len();
     app.page = body.height as usize;
     app.cur.clamp(len);
     app.cur.keep_in_view(len, body.height as usize);
 
     let content = vscroll(buf, body, app.cur.offset, len, body.height as usize);
     let vis = content.height as usize;
-    // Fetch only the visible window from the paginated RangeSource — never the whole
-    // (possibly huge) range. `fetch_after(Some(offset-1), vis)` yields [offset, +vis).
-    let key = app.cur.offset.checked_sub(1).map(|k| k as u64);
-    let window = app.table_source().fetch_after(key, vis);
-    for (idx, row) in &window.rows {
-        let i = *idx as usize;
+
+    // Draw one address row at visible index `i` (its absolute row index into the list).
+    let draw_row = |buf: &mut Buffer, i: usize, row: &AddressStatus, addr: &str, name: Option<&str>| {
         let y = content.y + (i - app.cur.offset) as u16;
         let selected = i == app.cur.cursor;
         if selected {
             fill_row(buf, content.x, y, content.width, s_sel());
         }
         let base = if selected { s_sel() } else { s_normal() };
-        let stat = if selected { s_sel() } else { status_style(row.status) };
+        let stat = if selected { s_sel() } else { status_style(*row) };
         let name_style = if selected { s_sel() } else { s_dim() };
-
-        btxt(buf, content.x, y, &format!("{:<15}", row.addr.to_string()), base);
-        btxt(buf, content.x + 16, y, status_label(row.status), stat);
-        if let Some(n) = &row.name {
+        btxt(buf, content.x, y, &format!("{addr:<15}"), base);
+        btxt(buf, content.x + 16, y, status_label(*row), stat);
+        if let Some(n) = name {
             btxt(buf, content.x + 34, y, n, name_style);
+        }
+    };
+
+    if sparse {
+        // Sparse (huge IPv6): list only the known addresses — the free space is 2^N and
+        // can't be enumerated. A window over the bounded, sorted known rows.
+        let rows = app.known_rows();
+        for (i, row) in rows.iter().enumerate().skip(app.cur.offset).take(vis) {
+            draw_row(buf, i, &row.status, &row.addr.to_string(), row.name.as_deref());
+        }
+        btxt(
+            buf,
+            area.x,
+            body.y + body.height,
+            &format!("showing {} known addresses — {} free (not listed)", len, fmt_count(app.counts.free)),
+            s_dim(),
+        );
+    } else {
+        // Enumerable: window the whole range from the paginated RangeSource — never the
+        // whole (possibly huge) range. `fetch_after(Some(offset-1), vis)` yields [offset, +vis).
+        let key = app.cur.offset.checked_sub(1).map(|k| k as u64);
+        let window = app.table_source().fetch_after(key, vis);
+        for (idx, row) in &window.rows {
+            draw_row(buf, *idx as usize, &row.status, &row.addr.to_string(), row.name.as_deref());
         }
     }
 
-    // ── footer ──
+    // ── footer ── ("next free" is meaningless when free space is 2^N and unlisted)
+    let free_hint = if sparse { ("g/G", "top/end") } else { ("f", "next free") };
     keyhints(
         buf,
         area.x,
@@ -279,7 +303,7 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
         area.width,
         &[
             ("j/k", "move"),
-            ("f", "next free"),
+            free_hint,
             ("a", "allocate"),
             ("Enter", "inspect"),
             ("L", "live"),
@@ -359,10 +383,12 @@ fn alloc_overlay(buf: &mut Buffer, area: Rect, app: &App) {
 /// A centred panel showing the selected address's facts from each source and the
 /// reason for its verdict — the "why" behind the status.
 pub(crate) fn detail_overlay(buf: &mut Buffer, area: Rect, app: &App) {
-    if app.total == 0 || area.width < 44 || area.height < 12 {
+    let Some(row) = app.selected_row() else {
+        return;
+    };
+    if area.width < 44 || area.height < 12 {
         return;
     }
-    let row = app.row_at(app.cur.cursor.min(app.total - 1));
     let w = 58u16.min(area.width - 4);
     let h = 9u16.min(area.height - 4);
     let x = area.x + (area.width - w) / 2;

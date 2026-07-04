@@ -212,7 +212,7 @@ impl App {
         let total = range.host_count().min(usize::MAX as u128) as usize;
         let facts: Rc<HashMap<IpAddr, AddressFacts>> =
             Rc::new(facts.into_iter().map(|f| (f.addr, f)).collect());
-        let counts = reconcile::counts_from_facts(total as u128, &facts);
+        let counts = reconcile::counts_from_facts(range.host_count(), &facts);
         let (graph, graph_canvas) = build_graph(&facts);
         App {
             range,
@@ -374,7 +374,7 @@ impl App {
     fn apply_live(&mut self, data: LiveData) {
         self.subnets = data.subnets;
         self.facts = Rc::new(data.facts.into_iter().map(|f| (f.addr, f)).collect());
-        self.counts = reconcile::counts_from_facts(self.total as u128, &self.facts);
+        self.counts = reconcile::counts_from_facts(self.range.host_count(), &self.facts);
         let (graph, canvas) = build_graph(&self.facts);
         self.graph = graph;
         self.graph_canvas = canvas;
@@ -422,12 +422,40 @@ impl App {
         rows
     }
 
+    /// Whether the address table lists **every** address (an enumerable range) or only
+    /// the **known** ones (a sparse IPv6 range too large to enumerate).
+    #[must_use]
+    pub fn table_sparse(&self) -> bool {
+        !self.range.is_enumerable()
+    }
+
+    /// The number of navigable rows in the table: every address for an enumerable range,
+    /// or just the known addresses for a sparse one.
+    #[must_use]
+    pub fn table_len(&self) -> usize {
+        if self.table_sparse() {
+            self.facts.len()
+        } else {
+            self.total
+        }
+    }
+
+    /// The reconciled row currently under the table cursor, for whichever mode is
+    /// active — the `i`-th address of the range, or the `i`-th known address.
+    #[must_use]
+    pub fn selected_row(&self) -> Option<AddressRow> {
+        if self.table_sparse() {
+            self.known_rows().into_iter().nth(self.cur.cursor)
+        } else {
+            (self.cur.cursor < self.total).then(|| self.row_at(self.cur.cursor))
+        }
+    }
+
     /// Begin allocating the selected row — only free addresses qualify.
     fn start_alloc(&mut self) {
-        if self.total == 0 {
+        let Some(row) = self.selected_row() else {
             return;
-        }
-        let row = self.row_at(self.cur.cursor);
+        };
         if !row.status.is_free() {
             self.status = Some(("only free addresses can be allocated".to_string(), true));
             return;
@@ -667,7 +695,7 @@ impl App {
     fn set_scope(&mut self, range: Cidr, facts: Rc<HashMap<IpAddr, AddressFacts>>) {
         self.range = range;
         self.total = range.host_count().min(usize::MAX as u128) as usize;
-        self.counts = reconcile::counts_from_facts(self.total as u128, &facts);
+        self.counts = reconcile::counts_from_facts(range.host_count(), &facts);
         let (graph, canvas) = build_graph(&facts);
         self.graph = graph;
         self.graph_canvas = canvas;
@@ -726,17 +754,24 @@ impl App {
         }
     }
 
-    /// Open the inspect panel for `addr` by pointing the table cursor at its row.
+    /// Open the inspect panel for `addr` by pointing the table cursor at its row — the
+    /// address's whole-range index when enumerable, or its position among the known rows
+    /// when sparse (so v6 inspect lands on the right row).
     fn inspect_addr(&mut self, addr: IpAddr) {
-        if let Some(i) = self.range.host_index(addr) {
-            self.cur.cursor = i as usize;
+        let pos = if self.table_sparse() {
+            self.known_rows().iter().position(|r| r.addr == addr)
+        } else {
+            self.range.host_index(addr).map(|i| i as usize)
+        };
+        if let Some(i) = pos {
+            self.cur.cursor = i;
             self.detail = true;
         }
     }
 
     /// Keys for the table view: list navigation and the inspect panel.
     fn on_key_table(&mut self, code: KeyCode) {
-        let len = self.total;
+        let len = self.table_len();
         match code {
             KeyCode::Char('q') => self.quit = true,
             // Esc closes the inspect panel if open, otherwise quits.
@@ -779,6 +814,12 @@ impl App {
     /// around the range. Rows are computed on demand, so this scans lazily; on a
     /// mostly-empty range the next address is usually free, so it returns at once.
     fn jump_next_free(&mut self) {
+        // In sparse mode the table lists only known (taken) addresses; "next free" over a
+        // 2^N free space is meaningless, so it's a no-op there.
+        if self.table_sparse() {
+            self.status = Some(("next-free needs an enumerable range".to_string(), true));
+            return;
+        }
         let len = self.total;
         if len == 0 {
             return;
@@ -1066,6 +1107,31 @@ mod tests {
         assert!(matches!(corner, Color::Rgb(_, g, _) if g > 150), "bump greens the corner: {corner:?}");
         let far = buf.get(12, 5).style.fg; // opposite side of the ring
         assert!(matches!(far, Color::Rgb(70, 70, 100)), "far border stays dim: {far:?}");
+    }
+
+    #[test]
+    fn sparse_ipv6_table_lists_known_only_with_true_free_count() {
+        let range = Cidr::parse("2001:db8::/48").unwrap();
+        let facts: Vec<AddressFacts> = (1..=5u128)
+            .map(|i| AddressFacts {
+                addr: IpAddr::V6(std::net::Ipv6Addr::from(u128::from(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0)) + i)),
+                netbox: None,
+                ptr: Some(format!("h{i}.nfra.nl.")),
+                live: false,
+            })
+            .collect();
+        let mut app = App::new(range, facts, false, false, false, Config::default());
+        assert!(app.table_sparse());
+        assert_eq!(app.table_len(), 5); // known addresses only, not 2^80 rows
+        // Free count is the true 2^80 − 5, not the usize-clamped total.
+        assert_eq!(app.counts.free, (1u128 << 80) - 5);
+        assert_eq!(app.counts.dns_only, 5);
+        // The cursor selects the i-th known address.
+        app.cur.cursor = 2;
+        assert_eq!(app.selected_row().unwrap().addr, "2001:db8::3".parse::<IpAddr>().unwrap());
+        // 'G' jumps to the last known row, bounded by the known count, not the range size.
+        app.on_key(KeyCode::Char('G'));
+        assert_eq!(app.cur.cursor, 4);
     }
 
     #[test]
