@@ -11,6 +11,7 @@
 
 pub mod dns;
 pub mod estate;
+pub mod inventory;
 pub mod netbox;
 pub mod probe;
 pub mod vantage;

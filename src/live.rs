@@ -87,6 +87,21 @@ pub fn gather_live_with_token(
     Ok(LiveData { facts: sources::merge(vec![nb, dns_facts, live]), subnets })
 }
 
+/// Gather the enriched NetBox inventory (prefixes, VLANs, devices, address→device
+/// assignments) for `range`, fetching the token first. Used by the `--inventory` command.
+///
+/// # Errors
+/// Propagates a token failure or the NetBox fetch.
+pub fn gather_inventory(range: &Cidr, cfg: &Config) -> anyhow::Result<crate::sources::inventory::Inventory> {
+    let token = get_token(&cfg.token_pass)?;
+    let netbox = NetboxSource {
+        vantage: Vantage::with_jump(&cfg.vantage, &cfg.jump),
+        base_url: cfg.netbox_url.clone(),
+        token,
+    };
+    netbox.gather_inventory(range)
+}
+
 /// Fetch the NetBox token from `$CANOPY_NETBOX_TOKEN`, else from `pass`.
 ///
 /// Keeping it out of argv and config: the env var wins for CI, otherwise we shell

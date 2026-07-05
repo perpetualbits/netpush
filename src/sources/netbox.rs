@@ -6,6 +6,7 @@
 
 use anyhow::Context;
 
+use super::inventory::{self, Inventory};
 use super::{FactSource, Vantage};
 use crate::reconcile::{AddressFacts, Cidr, NetBoxRecord, Subnet};
 
@@ -42,6 +43,39 @@ impl FactSource for NetboxSource {
 }
 
 impl NetboxSource {
+    /// Gather the **enriched** NetBox inventory for `range`: rich prefixes (role/VLAN/site)
+    /// within it, the VLANs and devices of the estate, and the address→device assignments
+    /// inside it — the structure later views and the reconciler consume.
+    ///
+    /// All four fetches paginate through the vantage with the token over stdin, like every
+    /// other NetBox call. Prefixes and assignments are scoped to `range`; VLANs and devices
+    /// are estate-wide (so a role/rack lookup works for any assigned device).
+    ///
+    /// # Errors
+    /// Propagates SSH/HTTP failures or a non-JSON body from any of the four endpoints.
+    pub fn gather_inventory(&self, range: &Cidr) -> anyhow::Result<Inventory> {
+        let base = self.base_url.trim_end_matches('/');
+        let (net, pl) = (range.network(), range.prefix_len);
+
+        let mut prefixes = Vec::new();
+        for json in self.paginate(format!("{base}/api/ipam/prefixes/?within_include={net}/{pl}&limit=1000"))? {
+            prefixes.extend(inventory::parse_prefixes_rich(&json)?);
+        }
+        let mut vlans = Vec::new();
+        for json in self.paginate(format!("{base}/api/ipam/vlans/?limit=1000"))? {
+            vlans.extend(inventory::parse_vlans(&json)?);
+        }
+        let mut devices = Vec::new();
+        for json in self.paginate(format!("{base}/api/dcim/devices/?limit=1000"))? {
+            devices.extend(inventory::parse_devices(&json)?);
+        }
+        let mut assignments = Vec::new();
+        for json in self.paginate(format!("{base}/api/ipam/ip-addresses/?parent={net}/{pl}&limit=1000"))? {
+            assignments.extend(inventory::parse_ip_assignments(&json)?);
+        }
+        Ok(Inventory { prefixes, vlans, devices, assignments })
+    }
+
     /// Fetch the NetBox **prefixes** (defined subnets) that fall within `range`, so the
     /// map can tell you which real, variable-length subnet the cursor is in.
     ///

@@ -65,6 +65,11 @@ struct Args {
     #[arg(long)]
     save_estate: bool,
 
+    /// Print the enriched NetBox inventory for the range — prefixes (role/VLAN/site) and the
+    /// devices addresses are assigned to (name/role/rack). Read-only.
+    #[arg(long)]
+    inventory: bool,
+
     /// SSH host to run NetBox + DNS queries from. Overrides the config's `vantage`.
     #[arg(long)]
     vantage: Option<String>,
@@ -135,6 +140,13 @@ fn main() -> anyhow::Result<()> {
     // Discover the DNS estate and merge it into the site file (diff; --write to save).
     if args.save_estate {
         return run_save_estate(&args, &cfg);
+    }
+
+    // Print the enriched NetBox inventory for the range (read-only).
+    if args.inventory {
+        let range = Cidr::parse(args.range.as_deref().or(cfg.range.as_deref()).unwrap_or(DEMO_RANGE)).map_err(|e| anyhow::anyhow!(e))?;
+        print!("{}", live::gather_inventory(&range, &cfg)?.report(&range));
+        return Ok(());
     }
 
     // The range to survey: `--range` wins, else the config's `range`. `None` means
