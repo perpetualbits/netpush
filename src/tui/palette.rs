@@ -43,12 +43,6 @@ pub fn hsl_rgb(h: f32, s: f32, l: f32) -> Color {
     Color::Rgb(to(r), to(g), to(b))
 }
 
-/// Normalized Rec. 601 luma of a colour, `[0, 1]`.
-fn luma(c: Color) -> f32 {
-    let Color::Rgb(r, g, b) = c else { return 0.5 };
-    (0.30 * f32::from(r) + 0.59 * f32::from(g) + 0.11 * f32::from(b)) / 255.0
-}
-
 /// Map an occupancy fraction `f ∈ [0, 1]` onto `[0, 1]` on a logarithmic scale of `decades`
 /// (so a barely-used block is not indistinguishable from an empty one).
 fn occ(f: f32, decades: f32) -> f32 {
@@ -59,12 +53,25 @@ fn occ(f: f32, decades: f32) -> f32 {
     }
 }
 
-/// A luma-biased curve colour: a line that contrasts its background `bg` (dark on a bright
-/// cell, bright on a dark one) but is tinted by the curve position `pos` — so the path is
-/// always legible yet its hue drifts along the curve. `sat` sets how strong the tint is.
-fn curve_fg(bg: Color, pos: f32, sat: f32) -> Color {
-    let base = if luma(bg) > 0.5 { 0.18 } else { 0.9 };
-    hsl_rgb(pos * 300.0, sat, base)
+/// A **luma-biased** curve colour: brightness carries the signal — a dim grey line for
+/// empty space, brightening to near-white as the block fills — with only a light `hue`/`sat`
+/// tint. `t` is the log occupancy. This is the line that should *pop* over the dim
+/// background.
+fn luma_curve(t: f32, empty: bool, hue: f32, sat: f32) -> Color {
+    if empty {
+        return hsl_rgb(0.0, 0.0, 0.34); // a dim grey line for empty IP space
+    }
+    hsl_rgb(hue, sat, lerp(0.44, 0.98, t))
+}
+
+/// A **dim** background lightness — colourful (the chroma-biased signal) but never bright,
+/// so the bright curve reads on top. `empty` cells are near-black.
+fn dim_bg(t: f32, empty: bool, k: &Knobs) -> f32 {
+    if empty {
+        0.05
+    } else {
+        lerp(k.floor, k.ceiling, t)
+    }
 }
 
 /// The tunable parameters shared by every scheme — a flat, bounded vector (see [`KNOBS`]),
@@ -89,9 +96,9 @@ pub struct Knobs {
 
 impl Default for Knobs {
     fn default() -> Self {
-        // Deliberately no white/yellow blaze at the top: lightness capped at 0.60, and the
-        // full end is a warm orange (hue 40), not amber — occupancy still reads, but calmly.
-        Knobs { decades: 3.0, ceiling: 0.60, floor: 0.12, bg_sat: 0.85, fg_sat: 0.35, hue_lo: 0.0, hue_hi: 40.0 }
+        // Dim, colourful background (lightness ≤ 0.38, saturated hue red→amber), so the
+        // bright luma curve on top does the shouting. The curve is only lightly tinted.
+        Knobs { decades: 3.0, ceiling: 0.38, floor: 0.05, bg_sat: 0.9, fg_sat: 0.3, hue_lo: 0.0, hue_hi: 40.0 }
     }
 }
 
@@ -99,8 +106,8 @@ impl Default for Knobs {
 /// this is all it takes to expose a new parameter to the UI and to any future search.
 pub const KNOBS: [(&str, f32, f32, f32); 7] = [
     ("decades", 1.0, 6.0, 0.5),
-    ("ceiling", 0.35, 1.0, 0.04),
-    ("floor", 0.0, 0.5, 0.03),
+    ("bg_ceiling", 0.12, 0.85, 0.03), // max background lightness (keep it dim)
+    ("bg_floor", 0.0, 0.4, 0.03),
     ("bg_sat", 0.0, 1.0, 0.05),
     ("fg_sat", 0.0, 1.0, 0.05),
     ("hue_lo", 0.0, 360.0, 12.0),
@@ -186,26 +193,24 @@ impl Scheme {
         let empty = frac <= 0.0;
         match self {
             Scheme::ChromaLuma => {
-                let light = if empty { 0.06 } else { lerp(k.floor, k.ceiling, t) };
-                let bg = hsl_rgb(lerp(k.hue_lo, k.hue_hi, t), k.bg_sat, light);
-                (bg, curve_fg(bg, pos, k.fg_sat))
+                let hue = lerp(k.hue_lo, k.hue_hi, t);
+                let bg = hsl_rgb(hue, k.bg_sat, dim_bg(t, empty, k));
+                (bg, luma_curve(t, empty, hue, k.fg_sat)) // bright line, faint occupancy tint
             }
             Scheme::Heat => {
-                let light = if empty { 0.06 } else { lerp(k.floor, k.ceiling, t) };
-                let bg = hsl_rgb(lerp(0.0, 55.0, t), k.bg_sat, light);
-                let fg = if luma(bg) > 0.5 { Color::Rgb(20, 20, 20) } else { Color::Rgb(225, 225, 225) };
-                (bg, fg)
+                let hue = lerp(0.0, 40.0, t);
+                let bg = hsl_rgb(hue, k.bg_sat, dim_bg(t, empty, k));
+                (bg, luma_curve(t, empty, hue, k.fg_sat * 0.5))
             }
             Scheme::CurveHue => {
-                let light = if empty { 0.05 } else { lerp(0.08, 0.34, t) };
-                let bg = hsl_rgb(lerp(k.hue_lo, k.hue_hi, t), k.bg_sat * 0.5, light);
-                (bg, hsl_rgb(pos * 330.0, k.fg_sat.max(0.6), 0.62))
+                // The curve is the star: full-spectrum hue by position, bright; dim bg under it.
+                let bg = hsl_rgb(lerp(k.hue_lo, k.hue_hi, t), k.bg_sat * 0.6, dim_bg(t, empty, k) * 0.7);
+                let fg = if empty { hsl_rgb(0.0, 0.0, 0.34) } else { hsl_rgb(pos * 330.0, k.fg_sat.max(0.7), lerp(0.55, 0.95, t)) };
+                (bg, fg)
             }
             Scheme::Mono => {
-                let light = if empty { 0.06 } else { lerp(0.15, k.ceiling, t) };
-                let g = (light * 255.0).round() as u8;
-                let fg = if light > 0.5 { Color::Rgb(20, 20, 20) } else { Color::Rgb(230, 230, 230) };
-                (Color::Rgb(g, g, g), fg)
+                let g = (dim_bg(t, empty, k) * 255.0).round() as u8;
+                (Color::Rgb(g, g, g), luma_curve(t, empty, 0.0, 0.0)) // grey background, grey line
             }
         }
     }
@@ -214,6 +219,12 @@ impl Scheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Normalized Rec. 601 luma of a colour, `[0, 1]` — for asserting brightness in tests.
+    fn luma(c: Color) -> f32 {
+        let Color::Rgb(r, g, b) = c else { return 0.5 };
+        (0.30 * f32::from(r) + 0.59 * f32::from(g) + 0.11 * f32::from(b)) / 255.0
+    }
 
     #[test]
     fn hsl_endpoints() {
@@ -232,6 +243,20 @@ mod tests {
         let k = Knobs { ceiling: 1.0, ..Knobs::default() };
         let (bright, _) = Scheme::ChromaLuma.paint(1.0, 0.5, &k);
         assert!(luma(bright) > luma(bg));
+    }
+
+    #[test]
+    fn curve_is_brighter_than_background_and_empty_is_dim_grey() {
+        let k = Knobs::default();
+        // A full cell: the luma curve is brighter than the dim chroma background.
+        let (bg, fg) = Scheme::ChromaLuma.paint(1.0, 0.5, &k);
+        assert!(luma(fg) > luma(bg), "curve must be brighter than bg: fg={} bg={}", luma(fg), luma(bg));
+        // An empty cell: near-black background, a dim grey line (equal RGB, mid-low luma).
+        let (ebg, efg) = Scheme::ChromaLuma.paint(0.0, 0.2, &k);
+        assert!(luma(ebg) < 0.15, "empty bg should be near-black, got {}", luma(ebg));
+        let Color::Rgb(r, g, b) = efg else { panic!("rgb") };
+        assert!(r == g && g == b, "empty curve should be grey, got {r},{g},{b}");
+        assert!(luma(efg) > luma(ebg) && luma(efg) < 0.5, "empty curve should be a dim grey");
     }
 
     #[test]
