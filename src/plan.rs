@@ -154,7 +154,7 @@ impl Plan {
         // 3) Reverse PTR — the IPv4 10.in-addr.arpa zone is mastered on ntserver1, a
         // WINDOWS DNS server owned by another team (no SSH/BIND, RDP-only, not
         // automatable); the IPv6 ip6.arpa zone is likewise mastered elsewhere. Either
-        // way this is a MANUAL hand-off — netpush emits the exact record and where it
+        // way this is a MANUAL hand-off — canopy emits the exact record and where it
         // goes, for a human to add. It is never auto-applied.
         let ptr_rec = Record::ptr(reverse_ptr(alloc.addr), &fqdn);
         let (rev_host, rev_zone) = if alloc.addr.is_ipv6() {

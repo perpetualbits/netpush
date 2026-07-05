@@ -2,7 +2,7 @@
 # Copyright (C) 2026  Epsilon Null Operation
 
 [package]
-name = "netpush"
+name = "canopy"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
@@ -10,7 +10,7 @@ license = "GPL-3.0-or-later"
 description = "Reconcile IP allocation across NetBox, DNS and the live network, then push the fixes — a TUI."
 
 [[bin]]
-name = "netpush"
+name = "canopy"
 path = "src/main.rs"
 
 [dependencies]

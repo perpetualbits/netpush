@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Copyright (C) 2026  Epsilon Null Operation -->
 
-# netpush — the long vision
+# canopy — the long vision
 
 Recorded 2026-07-03. This is the north star; the [README roadmap](../README.md)
 tracks the near-term steps toward it.
@@ -41,7 +41,7 @@ ugly arrangement. Constrain the search space to shape the result.
 1. **Lay out** the *current* DNS nicely as a node graph.
 2. **Transform** it — on the graph — into what we want it to become.
 3. **Migrate** the backing server to something modern, e.g. **Technitium** or
-   **PowerDNS**, and **use netpush to drive the transition** (diff current → target,
+   **PowerDNS**, and **use canopy to drive the transition** (diff current → target,
    push the changes, verify).
 
 The reconciler built in milestone 1 is the seed of this: it already compares "what is"
@@ -75,7 +75,7 @@ Extend the same model to the **switching/routing fabric**:
   you want and the tool pushes it (VLAN assignment, port config, routes) — *only when
   you have explicitly put it in "apply" mode*. Design-only by default.
 
-At that point netpush is a **real network tool**: one node graph over DNS, IPAM, and
+At that point canopy is a **real network tool**: one node graph over DNS, IPAM, and
 the L2/L3 fabric, where the picture and the running config are the same thing.
 
 ## AAA & security (non-negotiable for the above)
@@ -89,7 +89,7 @@ the fabric side must be stricter still.
 
 ## Pagination (needed for scale)
 
-netpush must paginate. A `/24` fits on screen, but `10.0.0.0/8` is 16,777,216
+canopy must paginate. A `/24` fits on screen, but `10.0.0.0/8` is 16,777,216
 addresses; DNS zones and other listings grow unbounded too. Every data path —
 reconcile, the table, the tree, the graph — needs **windowed, lazy, paginated** data
 and must never materialise a whole `/8` (or a giant zone) at once. This underpins all

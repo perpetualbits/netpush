@@ -29,7 +29,7 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     app.pan.1 = app.pan.1.min(ch.saturating_sub(1));
 
     // ── frame + header ──
-    let title = format!("netpush — graph: {}/{}", app.range.base, app.range.prefix_len);
+    let title = format!("canopy — graph: {}/{}", app.range.base, app.range.prefix_len);
     let prog = app.progress.as_ref().map(|(f, l)| (*f, l.as_str()));
     let area = super::draw::frame(buf, full, &title, s_title(), Some(super::draw::data_badge(app)), prog, &app.heartbeat());
     let hosts = app.graph.nodes.len().saturating_sub(app.graph.cluster_count());

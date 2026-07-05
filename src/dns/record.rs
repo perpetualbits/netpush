@@ -8,7 +8,7 @@ use std::fmt;
 
 use super::name::DnsName;
 
-/// The record types netpush handles today. Anything else is kept verbatim.
+/// The record types canopy handles today. Anything else is kept verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordType {
     /// IPv4 address.

@@ -13,7 +13,7 @@ use super::name::DnsName;
 use super::record::Record;
 use super::serial::SerialScheme;
 
-/// A zone netpush can edit, and the box it lives on.
+/// A zone canopy can edit, and the box it lives on.
 #[derive(Debug, Clone)]
 pub struct Zone {
     /// The zone apex, e.g. `nfra.nl` or `10.in-addr.arpa`.
@@ -43,7 +43,7 @@ impl Zone {
     ///
     /// NOTE: the real `10.in-addr.arpa` master on this estate is **ntserver1, a
     /// Windows DNS server** owned by another team — no SSH/BIND, RDP-only, not
-    /// automatable (see `docs/dns-estate.md`). netpush does NOT use this recipe for
+    /// automatable (see `docs/dns-estate.md`). canopy does NOT use this recipe for
     /// that reverse: the PTR is a manual hand-off (see `Plan::for_allocation`). The
     /// `file` here is a placeholder because this template is never applied as-is.
     #[must_use]
@@ -106,7 +106,7 @@ sudo -n cp -a "$f" "$tmp"
 sudo -n sed -i "s/\b$cur\b/$new/" "$tmp"
 printf '%s\n' '@RECORD@' | sudo -n tee -a "$tmp" >/dev/null
 if sudo -n named-checkzone "$origin" "$tmp" >/dev/null 2>&1; then
-  sudo -n cp -a "$f" "$f.netpush-bak"
+  sudo -n cp -a "$f" "$f.canopy-bak"
   sudo -n install -m 644 -o root -g bind "$tmp" "$f"
   sudo -n rndc reload "$origin"
   echo "APPLIED $origin: serial $cur -> $new; added @RECORD@"
@@ -137,7 +137,7 @@ mod tests {
 
         // Validates a copy before touching the live file, and keeps a backup.
         assert!(s.contains("named-checkzone \"$origin\" \"$tmp\""));
-        assert!(s.contains("$f.netpush-bak"));
+        assert!(s.contains("$f.canopy-bak"));
         assert!(s.contains("rndc reload"));
         // Correct scheme snippet and the zone-relative record.
         assert!(s.contains("cand=$((today*100))"));

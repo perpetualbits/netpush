@@ -1,9 +1,9 @@
-# netpush config — copy to ~/.config/netpush/config.toml (or pass --config FILE).
+# canopy config — copy to ~/.config/canopy/config.toml (or pass --config FILE).
 # Every key is optional; omitted keys keep their built-in default (shown below).
 # CLI flags (--vantage, --range, …) override anything set here.
 #
 # No secrets live here: the NetBox token is fetched from `pass` (the entry named by
-# `token_pass`) or the $NETPUSH_NETBOX_TOKEN environment variable.
+# `token_pass`) or the $CANOPY_NETBOX_TOKEN environment variable.
 
 # Default CIDR range to browse.
 range      = "10.87.3.0/24"

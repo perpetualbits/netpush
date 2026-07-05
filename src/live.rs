@@ -77,7 +77,7 @@ pub fn gather_live_with_token(
     Ok(LiveData { facts: sources::merge(vec![nb, dns_facts, live]), subnets })
 }
 
-/// Fetch the NetBox token from `$NETPUSH_NETBOX_TOKEN`, else from `pass`.
+/// Fetch the NetBox token from `$CANOPY_NETBOX_TOKEN`, else from `pass`.
 ///
 /// Keeping it out of argv and config: the env var wins for CI, otherwise we shell
 /// out to `pass <entry>` and take the first line.
@@ -92,7 +92,7 @@ pub fn gather_live_with_token(
 pub fn get_token(pass_entry: &str) -> anyhow::Result<String> {
     use std::process::{Command, Stdio};
 
-    if let Ok(t) = std::env::var("NETPUSH_NETBOX_TOKEN") {
+    if let Ok(t) = std::env::var("CANOPY_NETBOX_TOKEN") {
         if !t.trim().is_empty() {
             return Ok(t.trim().to_string());
         }
@@ -109,7 +109,7 @@ pub fn get_token(pass_entry: &str) -> anyhow::Result<String> {
     if !out.status.success() {
         anyhow::bail!(
             "`pass {pass_entry}` failed (see any GPG output above). Is the key unlocked? \
-             Otherwise run:  export NETPUSH_NETBOX_TOKEN=$(pass {pass_entry})"
+             Otherwise run:  export CANOPY_NETBOX_TOKEN=$(pass {pass_entry})"
         );
     }
     let token = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").trim().to_string();

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
 //! A **vantage host**: a machine we can `ssh` into that *can* reach the thing we
-//! need (NetBox, internal DNS, or the target L2). netpush itself usually runs off
+//! need (NetBox, internal DNS, or the target L2). canopy itself usually runs off
 //! the ASTRON network, so every live query is executed here via SSH, reusing the
 //! user's `~/.ssh/config` (bastion jump, keys, etc.).
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-//! `netpush` — a terminal UI that reconciles what NetBox, DNS and the live network
+//! `canopy` — a terminal UI that reconciles what NetBox, DNS and the live network
 //! each believe about an IP range, then (later) pushes the missing records.
 //!
 //! For now it runs against a frozen snapshot of the real `10.87.3.0/24` data (see
@@ -31,9 +31,9 @@ use sources::Vantage;
 
 /// Command-line options — mirrors census's read-only-by-default posture.
 #[derive(Parser, Debug)]
-#[command(name = "netpush", about = "Reconcile IP allocation across NetBox, DNS and the live network")]
+#[command(name = "canopy", about = "Reconcile IP allocation across NetBox, DNS and the live network")]
 struct Args {
-    /// Config file (default: ~/.config/netpush/config.toml if present).
+    /// Config file (default: ~/.config/canopy/config.toml if present).
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
@@ -57,7 +57,7 @@ struct Args {
     #[arg(long)]
     netbox_url: Option<String>,
 
-    /// `pass` entry holding the NetBox API token (or set NETPUSH_NETBOX_TOKEN).
+    /// `pass` entry holding the NetBox API token (or set CANOPY_NETBOX_TOKEN).
     /// Overrides the config's `token_pass`.
     #[arg(long)]
     token_pass: Option<String>,

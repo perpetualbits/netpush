@@ -161,7 +161,7 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     }
 
     // ── frame (title + data badge in the border) ──
-    let title = format!("netpush — map: {}/{}", app.range.base, app.range.prefix_len);
+    let title = format!("canopy — map: {}/{}", app.range.base, app.range.prefix_len);
     let prog = app.progress.as_ref().map(|(f, l)| (*f, l.as_str()));
     let area = super::draw::frame(buf, full, &title, s_title(), Some(super::draw::data_badge(app)), prog, &app.heartbeat());
 

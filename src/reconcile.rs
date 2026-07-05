@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-//! The pure heart of `netpush`: merge what three independent sources say about
+//! The pure heart of `canopy`: merge what three independent sources say about
 //! each IP address — **NetBox** (intended inventory), **DNS** (the PTR records
 //! actually served), and a **live probe** (ping/ARP) — into one [`AddressStatus`].
 //!

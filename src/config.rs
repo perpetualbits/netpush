@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-//! Optional config file at `~/.config/netpush/config.toml` (XDG-aware), mirroring
+//! Optional config file at `~/.config/canopy/config.toml` (XDG-aware), mirroring
 //! census's `Config`. Every field has a built-in default, so the file is optional;
 //! any CLI flag overrides whatever the file — or the default — provides. Secrets are
-//! never stored here: the NetBox token comes from `pass` (or `$NETPUSH_NETBOX_TOKEN`),
+//! never stored here: the NetBox token comes from `pass` (or `$CANOPY_NETBOX_TOKEN`),
 //! and `token_pass` just names the `pass` entry.
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// The resolved settings netpush runs with. Missing keys fall back per field.
+/// The resolved settings canopy runs with. Missing keys fall back per field.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(default)]
 pub struct Config {
@@ -60,8 +60,8 @@ impl Config {
     /// Load the config.
     ///
     /// With an explicit `path` (from `--config`) the file must exist. Otherwise the
-    /// default `~/.config/netpush/config.toml` is used **if present**, and built-in
-    /// defaults are returned when it is absent — so netpush works with no config at
+    /// default `~/.config/canopy/config.toml` is used **if present**, and built-in
+    /// defaults are returned when it is absent — so canopy works with no config at
     /// all. Any field the file omits keeps its default.
     ///
     /// # Errors
@@ -83,13 +83,13 @@ impl Config {
     }
 }
 
-/// `$XDG_CONFIG_HOME/netpush/config.toml`, falling back to `~/.config/netpush/…`.
+/// `$XDG_CONFIG_HOME/canopy/config.toml`, falling back to `~/.config/canopy/…`.
 #[must_use]
 pub fn config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| {
         PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
     });
-    base.join("netpush").join("config.toml")
+    base.join("canopy").join("config.toml")
 }
 
 #[cfg(test)]
@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn path_lands_under_netpush() {
-        assert!(config_path().ends_with("netpush/config.toml"));
+    fn path_lands_under_canopy() {
+        assert!(config_path().ends_with("canopy/config.toml"));
     }
 }

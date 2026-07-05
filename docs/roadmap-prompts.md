@@ -1,15 +1,15 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <!-- Copyright (C) 2026  Epsilon Null Operation -->
 
-# <NAME> — Claude Code prompt roadmap
+# canopy — Claude Code prompt roadmap
 
 A sequenced set of paste-ready prompts to grow this project from *netpush*
-(reconcile + push a single `/24`) into **<NAME>**: an authoritative, reconciled
+(reconcile + push a single `/24`) into **canopy**: an authoritative, reconciled
 view of the organization's network territory — its address space, structure, and
 groupings — built from many sources of truth (DNS servers, NetBox), that you can
 both **read** (visualize) and **act on** (provision, register, reconcile).
 
-> If you pick a different name, replace `<NAME>` throughout — only **P1** actually
+> If you pick a different name, replace `canopy` throughout — only **P1** actually
 > performs the rename; later prompts just reference the chosen name.
 
 **House rules apply to every prompt** (they live in `CLAUDE.md`): Rust 2021,
@@ -28,15 +28,15 @@ one reviewable change (compiles, tests, one capability).
 
 ## Phase 0 — Rename & re-theme
 
-### P1 — Rename to `<NAME>` and re-theme the docs
+### P1 — Rename to `canopy` and re-theme the docs
 
-> Rename this project from **netpush** to **<NAME>** and re-theme its docs around a
+> Rename this project from **netpush** to **canopy** and re-theme its docs around a
 > broadened vision, without changing behavior yet.
 >
-> 1. Rename the crate and binary to `<NAME>` in `Cargo.toml` (package name, `[[bin]]`
+> 1. Rename the crate and binary to `canopy` in `Cargo.toml` (package name, `[[bin]]`
 >    name, description). Update `Cargo.lock`.
 > 2. Update every in-code reference to the old name (module docs, `--help` text in
->    `main.rs`'s `#[command(name = ...)]`, doc-comments) to `<NAME>`.
+>    `main.rs`'s `#[command(name = ...)]`, doc-comments) to `canopy`.
 > 3. Rewrite `README.md` and `CLAUDE.md` to describe the new theme and four pillars:
 >    **(A)** multiple sources of truth (several DNS servers + NetBox) with automatic
 >    address-space discovery; **(B)** visualize — IP-space map (v4 **and** v6), layered
@@ -45,7 +45,7 @@ one reviewable change (compiles, tests, one capability).
 >    server, create the NetBox entry, report netmask/gateway/DNS for v4+v6); **(D)**
 >    reconcile DNS ↔ NetBox (complete one from the other; surface incomplete/conflicting
 >    records). Keep the "sibling of `census`, built on `mullion`" framing and the
->    land-registry metaphor (census surveys inhabitants; <NAME> surveys the territory).
+>    land-registry metaphor (census surveys inhabitants; canopy surveys the territory).
 > 4. Keep the existing safety, structure, and testing sections of `CLAUDE.md`; expand
 >    them only where the new pillars need it.
 >

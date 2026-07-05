@@ -3,12 +3,12 @@
 
 # The ASTRON DNS estate (as discovered)
 
-The map netpush's `dns` model encodes — and the topology the future node-graph view
+The map canopy's `dns` model encodes — and the topology the future node-graph view
 will draw. Recorded 2026-07-03 from live inspection.
 
 ## Zones, servers, serial schemes
 
-| Zone | Master server | File | Serial scheme | netpush status |
+| Zone | Master server | File | Serial scheme | canopy status |
 |------|---------------|------|---------------|----------------|
 | `nfra.nl` (forward) | **dns1.astron.nl** | `/etc/bind/master/db.nfra.nl` | `YYYYMMDDnn` (e.g. `2026070300`) | ✅ safe edit proven |
 | `astron.nl` (forward) | **dns1.astron.nl** | `/etc/bind/master/db.astron.nl` | `YYYYMMDDnn` | model ready |
@@ -35,8 +35,8 @@ and — org reality — changing anything on it is **slow, needs a remote-deskto
 session, and cannot currently be automated** (team territoriality). Things that
 would change this (install `sshd` + PowerShell, or WSL) are not on the table now.
 
-**Consequence for netpush:** the reverse `PTR` is a **manual hand-off**, not an SSH
-apply. netpush emits the exact record and its destination (the `10.in-addr.arpa`
+**Consequence for canopy:** the reverse `PTR` is a **manual hand-off**, not an SSH
+apply. canopy emits the exact record and its destination (the `10.in-addr.arpa`
 zone on ntserver1) for a human to add via RDP; it must NOT be modelled as a BIND
 file edit. The forward `A` (dns1, Linux/BIND) and the NetBox object stay fully
 automatable — only the PTR waits on the windows-people.

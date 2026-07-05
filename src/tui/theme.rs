@@ -78,7 +78,7 @@ pub fn s_err() -> Style {
 }
 
 /// Map census's palette onto mullion's semantic [`Theme`](mullion::Theme) so the
-/// engine's render helpers (`render_keyhints`, …) paint in netpush colours.
+/// engine's render helpers (`render_keyhints`, …) paint in canopy colours.
 pub fn mullion_theme() -> mullion::Theme {
     mullion::Theme {
         border: s_border(),

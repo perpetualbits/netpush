@@ -215,7 +215,7 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
 
     // ── outer frame: title + mode badge live in the border; content goes inside ──
     let mode = app.mode_label();
-    let title = format!("netpush — {}/{}", app.range.base, app.range.prefix_len);
+    let title = format!("canopy — {}/{}", app.range.base, app.range.prefix_len);
     let prog = app.progress.as_ref().map(|(f, l)| (*f, l.as_str()));
     let area = frame(buf, full, &title, s_title(), Some((mode.0, mode.1)), prog, &app.heartbeat());
 

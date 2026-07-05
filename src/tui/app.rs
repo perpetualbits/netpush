@@ -898,7 +898,7 @@ fn fetch_token_and_spawn(
     reader: EventReader,
     app: &mut App,
 ) -> anyhow::Result<EventReader> {
-    let env_token = std::env::var("NETPUSH_NETBOX_TOKEN").is_ok_and(|v| !v.trim().is_empty());
+    let env_token = std::env::var("CANOPY_NETBOX_TOKEN").is_ok_and(|v| !v.trim().is_empty());
     if env_token {
         match live::get_token(app.token_pass()) {
             Ok(tok) => app.spawn_live_gather(tok),
@@ -909,7 +909,7 @@ fn fetch_token_and_spawn(
 
     drop(reader); // stop the stdin-polling thread so pinentry gets the keystrokes
     term.leave()?; // cooked mode + main screen: pinentry owns the terminal
-    eprintln!("netpush: unlocking the NetBox token (pass/gpg) — enter your passphrase…");
+    eprintln!("canopy: unlocking the NetBox token (pass/gpg) — enter your passphrase…");
     let token = live::get_token(app.token_pass());
     term.enter()?; // back into the TUI …
     term.clear()?; // … and force a full repaint: pinentry scribbled over the screen,
@@ -1179,7 +1179,7 @@ mod tests {
             assert_eq!(buf.get(0, 23).symbol, "╰", "{view:?} bottom-left corner");
             // The title is bookended into the top edge (┤ … ├).
             let top: String = (0..90).map(|x| buf.get(x, 0).symbol.clone()).collect();
-            assert!(top.contains("netpush"), "{view:?} title in the top border: {top:?}");
+            assert!(top.contains("canopy"), "{view:?} title in the top border: {top:?}");
             assert!(top.contains('┤') && top.contains('├'), "{view:?} bookend caps");
         }
     }
