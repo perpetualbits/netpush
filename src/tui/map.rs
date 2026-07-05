@@ -6,20 +6,19 @@
 //! `/24`. The legend labels the block structure — the covered CIDR and the per-cell
 //! subnet size — not linear x/y ticks, which a Hilbert layout has no use for.
 //!
-//! Each cell is one glyph plus a spacer, so the marks are spaced equally in both
-//! dimensions (a terminal cell is ~twice as tall as wide) and the grid reads as squares.
-//! Empty IP space is a grey hollow `▫`; a used block is a filled `▪`. Colouring depends on
+//! Each cell **draws its segment of the actual Hilbert curve** with rounded box-drawing
+//! glyphs (`─│╭╮╰╯`), so the serpentine path — which cell follows which — is visible rather
+//! than left to the imagination. Occupancy is the cell **background**, per
 //! [`DensityStyle`](super::app::DensityStyle):
-//! - **Heatmap** (default) — a **logarithmic** ramp, deep red = barely used → white = full,
-//!   with no blue; because almost every block is sparse, the log scale spreads the low end
-//!   across the reds/oranges and reserves white for a genuinely full block.
-//! - **Shade** — a monochrome accent block `░▒▓█`, for low-colour terminals.
+//! - **Heatmap** (default) — a **logarithmic** ramp, near-black = empty → deep red = barely
+//!   used → white = full, with no blue; because almost every block is sparse, the log scale
+//!   spreads the low end across the reds/oranges and reserves white for a genuinely full block.
+//! - **Shade** — a monochrome grey ramp, for low-colour terminals.
 //!
-//! The cell background trails dark→light along the Hilbert curve, so the serpentine cell
-//! order is legible. `s` toggles the two styles. A highlighted cursor moves over the grid
-//! (`hjkl`); `Enter` zooms into the cell under it — always a clean subnet — and `Backspace`
-//! zooms back out, so a few steps take a `/8` down to a `/24` the table and tree resolve to
-//! single addresses.
+//! The curve line sits on top in a contrasting colour. `s` toggles the two styles. A
+//! highlighted cursor moves over the grid (`hjkl`); `Enter` zooms into the cell under it —
+//! always a clean subnet — and `Backspace` zooms back out, so a few steps take a `/8` down
+//! to a `/24` the table and tree resolve to single addresses.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -33,12 +32,9 @@ use super::theme::{s_accent, s_dim, s_sel, s_title};
 use crate::map::MapGrid;
 use crate::reconcile::{self, AddressFacts, Cidr, Subnet};
 
-/// Empty IP space: a grey hollow square. The small `▫` (not the full-size `□`) reads
-/// better on a dense grid — the look from aerie's `spiral_stress`.
-const EMPTY_GLYPH: char = '▫';
-/// A used block: a filled square (coloured by [`heat_color`], or the shade accent).
-/// The small `▪` to match [`EMPTY_GLYPH`].
-const USED_GLYPH: char = '▪';
+/// Background of an empty (unused) cell — a near-black, so occupancy reads straight off the
+/// cell background: dark = empty, deep-red → white = fuller.
+const EMPTY_BG: Color = Color::Rgb(22, 22, 26);
 
 /// A heat ramp, low → high occupancy: deep-red → red → orange-red → orange → orange-yellow
 /// → yellow → yellow-white → white. No blue — a fuller block is simply *hotter*, and a
@@ -82,43 +78,97 @@ fn heat_color(f: f32) -> Color {
     ramp_color(t)
 }
 
-/// A subtle dark background that brightens along the Hilbert curve (cell index `d` of
-/// `total`), so the eye can trace the serpentine order — which cell follows which. Kept to
-/// dark greys so it sits behind the heat glyphs without competing with them.
-fn trail_bg(d: usize, total: usize) -> Color {
-    let t = if total > 1 { d as f32 / (total - 1) as f32 } else { 0.0 };
-    let g = (14.0 + t * 34.0).round() as u8; // 14 → 48
+/// A grid direction from one cell to an adjacent one.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Dir {
+    L,
+    R,
+    U,
+    D,
+}
+
+/// The direction from grid cell `a` to an adjacent cell `b` (`None` if not 4-adjacent).
+fn dir_between(a: (u32, u32), b: (u32, u32)) -> Option<Dir> {
+    match (i64::from(b.0) - i64::from(a.0), i64::from(b.1) - i64::from(a.1)) {
+        (1, 0) => Some(Dir::R),
+        (-1, 0) => Some(Dir::L),
+        (0, 1) => Some(Dir::D),
+        (0, -1) => Some(Dir::U),
+        _ => None,
+    }
+}
+
+/// The rounded box-drawing glyph for the Hilbert curve through a cell, from the ports toward
+/// its previous and next cell on the curve — plus whether the segment continues to the
+/// **right** (so the 2-wide cell's spacer is drawn as `─` and the line stays unbroken).
+///
+/// A cell has two ports (the curve enters and leaves), one at the curve's endpoints, or none
+/// for a lone order-0 cell. The glyph joins them: `─│` straight, `╭╮╰╯` for a turn.
+fn curve_glyph(a: Option<Dir>, b: Option<Dir>) -> (char, bool) {
+    let has = |d: Dir| a == Some(d) || b == Some(d);
+    let (l, r, u, dn) = (has(Dir::L), has(Dir::R), has(Dir::U), has(Dir::D));
+    let ch = if l && r {
+        '─'
+    } else if u && dn {
+        '│'
+    } else if r && u {
+        '╰'
+    } else if l && u {
+        '╯'
+    } else if r && dn {
+        '╭'
+    } else if l && dn {
+        '╮'
+    } else if l || r {
+        '─' // single horizontal port (an endpoint of the curve)
+    } else if u || dn {
+        '│' // single vertical port
+    } else {
+        '·' // a lone cell (order 0)
+    };
+    (ch, r)
+}
+
+/// A foreground colour that stays legible on background `bg`: a dark line on a bright
+/// (near-full) cell, a light line on a dark (near-empty) one. Rec. 601 luma decides.
+fn contrast_fg(bg: Color) -> Color {
+    let Color::Rgb(r, g, b) = bg else { return Color::Rgb(230, 230, 230) };
+    let luma = 0.30 * f32::from(r) + 0.59 * f32::from(g) + 0.11 * f32::from(b);
+    if luma > 150.0 {
+        Color::Rgb(20, 20, 20)
+    } else {
+        Color::Rgb(225, 225, 225)
+    }
+}
+
+/// The monochrome (shade-style) background for a used fraction — a grey that lightens
+/// logarithmically with occupancy, for terminals where the heat colours would be lost.
+fn shade_bg(f: f32) -> Color {
+    let t = if f <= 0.0 { 0.0 } else { (1.0 + f.log10() / HEAT_DECADES).clamp(0.0, 1.0) };
+    let g = (45.0 + t * 195.0).round() as u8; // 45 → 240 grey
     Color::Rgb(g, g, g)
 }
 
-/// Shade-style glyph for a used fraction `f ∈ (0, 1]`: a block `░▒▓█` that deepens with
-/// density, in the accent colour. The monochrome fallback for terminals where the heat
-/// ramp's colours would be lost. (Empty cells are handled by the caller.)
-fn shade_glyph(f: f32) -> (char, Style) {
-    let level = ((f * 4.0).ceil() as usize).clamp(1, 4);
-    (['░', '▒', '▓', '█'][level - 1], s_accent())
-}
-
-/// Paint one map cell at `(x, y)`: a single glyph in column `x`, then a spacer in `x + 1`.
+/// Paint one map cell at `(x, y)`: the Hilbert-curve `glyph` in column `x` on a background
+/// coloured by occupancy, then a spacer in `x + 1` — a `─` when the curve continues right
+/// (`connects_right`) so the line is unbroken, otherwise blank.
 ///
-/// One glyph + one space makes the horizontal and vertical spacing of the marks equal (a
-/// terminal cell is about twice as tall as wide), so the grid reads as squares rather than
-/// wide rectangles. Empty blocks are a grey hollow square, used blocks a filled square
-/// coloured per [`DensityStyle`]; `trail` tints the background along the Hilbert curve, and
-/// `selected` paints the whole 2-column cell in the cursor style so the highlight wins.
-fn paint_cell(buf: &mut Buffer, x: u16, y: u16, frac: f32, style: DensityStyle, selected: bool, trail: Color) {
-    let (ch, cell_style) = if frac <= 0.0 {
-        (EMPTY_GLYPH, s_dim()) // empty IP space: a grey hollow square
+/// The occupancy is the **background**: near-black when empty, up the deep-red→white heat
+/// ramp as the block fills (or a grey ramp in shade mode); the curve line sits on top in a
+/// contrasting colour. `selected` paints both columns in the cursor style so it always wins.
+fn paint_cell(buf: &mut Buffer, x: u16, y: u16, frac: f32, style: DensityStyle, selected: bool, curve: (char, bool)) {
+    let (glyph, connects_right) = curve;
+    let bg = if frac <= 0.0 {
+        EMPTY_BG
     } else {
         match style {
-            DensityStyle::Heatmap => (USED_GLYPH, Style::default().fg(heat_color(frac))),
-            DensityStyle::Shade => shade_glyph(frac),
+            DensityStyle::Heatmap => heat_color(frac),
+            DensityStyle::Shade => shade_bg(frac),
         }
     };
-    let glyph_style = if selected { s_sel() } else { cell_style.bg(trail) };
-    let spacer_style = if selected { s_sel() } else { Style::default().bg(trail) };
-    buf.set_char(x, y, ch, glyph_style);
-    buf.set_char(x + 1, y, ' ', spacer_style);
+    let cell = if selected { s_sel() } else { Style::default().fg(contrast_fg(bg)).bg(bg) };
+    buf.set_char(x, y, glyph, cell);
+    buf.set_char(x + 1, y, if connects_right { '─' } else { ' ' }, cell);
 }
 
 /// The largest Hilbert order whose `2^order × 2^order` grid of 2-wide cells fits in
@@ -136,19 +186,23 @@ fn fit_order(body: Rect) -> u32 {
 /// `emptier → fuller` gradient swatch of the actual [`HEAT`] colours (so the ramp is
 /// self-documenting), or for shade the `░▒▓█` blocks.
 fn draw_legend_key(buf: &mut Buffer, x: u16, y: u16, style: DensityStyle) {
-    let mut cx = buf.set_string(x, y, "▫ empty   ", s_dim());
+    let mut cx = buf.set_string(x, y, "curve on bg · empty ", s_dim());
+    buf.set_char(cx, y, ' ', Style::default().bg(EMPTY_BG)); // the empty swatch
+    cx += 2;
     match style {
         DensityStyle::Heatmap => {
-            cx = buf.set_string(cx, y, "log: empty ", s_dim());
             for k in 0..12u16 {
-                // Even spread along the ramp (deep-red → white), so the key shows every stop.
-                let t = f32::from(k) / 11.0;
-                buf.set_char(cx + k, y, USED_GLYPH, Style::default().fg(ramp_color(t)));
+                // Background swatches spread evenly along the ramp (deep-red → white).
+                buf.set_char(cx + k, y, ' ', Style::default().bg(ramp_color(f32::from(k) / 11.0)));
             }
-            buf.set_string(cx + 12, y, " full", s_dim());
+            buf.set_string(cx + 12, y, " full (log)", s_dim());
         }
         DensityStyle::Shade => {
-            buf.set_string(cx, y, "░▒▓█ fuller", s_dim());
+            for k in 0..12u16 {
+                let g = (45.0 + f32::from(k) / 11.0 * 195.0) as u8;
+                buf.set_char(cx + k, y, ' ', Style::default().bg(Color::Rgb(g, g, g)));
+            }
+            buf.set_string(cx + 12, y, " full", s_dim());
         }
     }
 }
@@ -258,20 +312,24 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
         buf,
         area.x,
         scope_y,
-        &clip(&format!("scope: {crumb}{subnet_txt}   ·   cells follow the Hilbert curve (bg dark→light)"), area.width),
+        &clip(&format!("scope: {crumb}{subnet_txt}   ·   the line is the Hilbert curve · bg = occupancy"), area.width),
         s_dim(),
     );
 
-    // The Hilbert grid. One glyph + a spacer per cell for a square aspect; the background
-    // trails dark→light along the curve so the serpentine cell order is legible.
+    // The Hilbert grid: each cell draws its segment of the actual curve (rounded box glyphs)
+    // over a background coloured by occupancy, so the serpentine path is visible directly.
     let total = grid.cells();
     for d in 0..total {
-        let (gx, gy) = grid.cell_xy(d);
+        let cur = grid.cell_xy(d);
+        let (gx, gy) = cur;
         let selected = (gx, gy) == app.map_cur;
         let x = body.x + (gx as u16) * 2;
         let y = body.y + gy as u16;
         if x + 1 < body.x + body.width && y < body.y + body.height {
-            paint_cell(buf, x, y, grid.fraction(d), app.density, selected, trail_bg(d, total));
+            // The ports toward the previous and next cell on the curve give the glyph.
+            let prev = (d > 0).then(|| grid.cell_xy(d - 1)).and_then(|p| dir_between(cur, p));
+            let next = (d + 1 < total).then(|| grid.cell_xy(d + 1)).and_then(|n| dir_between(cur, n));
+            paint_cell(buf, x, y, grid.fraction(d), app.density, selected, curve_glyph(prev, next));
         }
     }
 
@@ -309,6 +367,29 @@ mod tests {
             let f = k as f32 / 100.0;
             assert!(matches!(heat_color(f), Color::Rgb(_, _, _)));
         }
+    }
+
+    #[test]
+    fn curve_glyph_joins_the_ports() {
+        // Straights, turns, endpoints, and the lone cell.
+        assert_eq!(curve_glyph(Some(Dir::L), Some(Dir::R)).0, '─');
+        assert_eq!(curve_glyph(Some(Dir::U), Some(Dir::D)).0, '│');
+        assert_eq!(curve_glyph(Some(Dir::R), Some(Dir::D)).0, '╭');
+        assert_eq!(curve_glyph(Some(Dir::L), Some(Dir::D)).0, '╮');
+        assert_eq!(curve_glyph(Some(Dir::R), Some(Dir::U)).0, '╰');
+        assert_eq!(curve_glyph(Some(Dir::L), Some(Dir::U)).0, '╯');
+        assert_eq!(curve_glyph(None, Some(Dir::R)).0, '─'); // endpoint
+        assert_eq!(curve_glyph(None, None).0, '·'); // order-0 lone cell
+        // The connects-right flag (drives the horizontal spacer) is set iff a port faces right.
+        assert!(curve_glyph(Some(Dir::L), Some(Dir::R)).1);
+        assert!(!curve_glyph(Some(Dir::L), Some(Dir::U)).1);
+    }
+
+    #[test]
+    fn dir_between_reads_grid_adjacency() {
+        assert_eq!(dir_between((2, 2), (3, 2)), Some(Dir::R));
+        assert_eq!(dir_between((2, 2), (2, 1)), Some(Dir::U));
+        assert_eq!(dir_between((2, 2), (4, 2)), None); // not 4-adjacent
     }
 
     #[test]
