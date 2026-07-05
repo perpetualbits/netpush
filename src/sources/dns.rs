@@ -557,6 +557,7 @@ garbage line without ip
                 host: "sub16.astron.nl".into(),
                 vantage: "jump.astron.nl".into(),
                 jump: "portal.lofar.eu".into(),
+                manual: false,
                 forward_zones: vec![],
                 reverse_zones: vec!["10.87.0.0/16".into()],
             },

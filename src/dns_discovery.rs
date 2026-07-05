@@ -168,6 +168,7 @@ fn assemble(zones: &BTreeMap<String, ServerZones>, owned: &[String]) -> Vec<DnsS
                 host: host.clone(),
                 vantage: String::new(),
                 jump: String::new(),
+                manual: false,
                 forward_zones: fwd.iter().cloned().collect(),
                 reverse_zones: rev.iter().cloned().collect(),
             }
@@ -291,12 +292,17 @@ fn read_named_conf(host: &str, jump: &str) -> Option<ServerZones> {
 /// `dig`/SSH failures are skipped so one dead server never aborts discovery.
 pub fn discover_dns_servers(cfg: &Config, token: &str, blocks: &[Cidr]) -> anyhow::Result<Vec<DnsServer>> {
     let owned: Vec<String> = cfg.domains.iter().map(|d| fold(d)).collect();
+    // Hand-curated servers are left entirely alone — neither enumerated nor attributed to.
+    let manual: BTreeSet<&str> = cfg.dns_servers.iter().filter(|s| s.manual).map(|s| s.host.as_str()).collect();
     let mut zones: BTreeMap<String, ServerZones> = BTreeMap::new();
     let mut covered_fwd: BTreeSet<String> = BTreeSet::new();
     let mut covered_rev: BTreeSet<String> = BTreeSet::new();
 
     // 1. AUTHORITATIVE: read named.conf on each configured server we can SSH to.
     for s in &cfg.dns_servers {
+        if s.manual {
+            continue;
+        }
         let jump = if s.jump.is_empty() { cfg.jump.as_str() } else { s.jump.as_str() };
         if let Some((fwd, rev)) = read_named_conf(&s.host, jump) {
             covered_fwd.extend(fwd.iter().cloned());
@@ -320,7 +326,7 @@ pub fn discover_dns_servers(cfg: &Config, token: &str, blocks: &[Cidr]) -> anyho
     for zone in &candidates {
         if let Ok(out) = vantage.run(&format!("dig SOA {zone}")) {
             if let Some((apex, master)) = parse_soa(&out) {
-                if is_ours(&master, &owned) && !covered_fwd.contains(&apex) {
+                if is_ours(&master, &owned) && !covered_fwd.contains(&apex) && !manual.contains(master.as_str()) {
                     zones.entry(master).or_default().0.insert(apex);
                 }
             }
@@ -341,7 +347,7 @@ pub fn discover_dns_servers(cfg: &Config, token: &str, blocks: &[Cidr]) -> anyho
                 if let Some(cidr) = reverse_zone_to_cidr(&apex) {
                     covered.push(cidr);
                     let cidr_s = format!("{}/{}", cidr.base, cidr.prefix_len);
-                    if is_ours(&master, &owned) && !covered_rev.contains(&cidr_s) {
+                    if is_ours(&master, &owned) && !covered_rev.contains(&cidr_s) && !manual.contains(master.as_str()) {
                         zones.entry(master).or_default().1.insert(cidr_s);
                     }
                 }
@@ -471,6 +477,7 @@ zone \"lofar.eu\" IN {
                 host: "dns1.astron.nl".into(),
                 vantage: String::new(),
                 jump: String::new(),
+                manual: false,
                 forward_zones: vec!["nfra.nl".into(), "astron.nl".into()],
                 reverse_zones: vec![],
             },
@@ -479,6 +486,7 @@ zone \"lofar.eu\" IN {
                 host: "ntserver1.nfra.nl".into(),
                 vantage: String::new(),
                 jump: String::new(),
+                manual: false,
                 forward_zones: vec![],
                 reverse_zones: vec!["10.0.0.0/8".into()],
             },

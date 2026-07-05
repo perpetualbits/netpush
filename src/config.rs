@@ -92,6 +92,11 @@ pub struct DnsServer {
     pub vantage: String,
     /// SSH `ProxyJump` chain to reach this server; empty falls back to the global `jump`.
     pub jump: String,
+    /// When `true`, this entry is **hand-curated**: `--discover-dns`/`--save-estate` skip it
+    /// and never overwrite its zones. Use it to pin a server canopy can't enumerate
+    /// reliably — e.g. a Windows/AD box with no `named-checkconf`, whose SOA view is
+    /// split-horizon noise.
+    pub manual: bool,
     /// Forward zones this server masters, as domain suffixes (e.g. `nfra.nl`).
     pub forward_zones: Vec<String>,
     /// Reverse blocks this server masters, as CIDR strings (e.g. `10.0.0.0/8`).
@@ -283,6 +288,13 @@ reverse_zones = [\"10.0.0.0/8\"]
         assert_eq!(c.dns_servers[0].name, "dns1");
         assert_eq!(c.dns_servers[0].forward_zones, vec!["nfra.nl", "astron.nl"]);
         assert!(c.dns_servers[0].vantage.is_empty()); // omitted → empty, falls back to global vantage
+        assert!(!c.dns_servers[0].manual); // omitted → not manual
         assert_eq!(c.dns_servers[1].reverse_zones, vec!["10.0.0.0/8"]);
+    }
+
+    #[test]
+    fn dns_server_manual_flag_parses() {
+        let c: Config = toml::from_str("[[dns_servers]]\nname = \"nt\"\nhost = \"nt.nfra.nl\"\nmanual = true\n").unwrap();
+        assert!(c.dns_servers[0].manual);
     }
 }

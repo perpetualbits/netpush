@@ -26,9 +26,10 @@ pub fn merge_estate(text: &str, discovered: &[DnsServer]) -> anyhow::Result<Stri
         .parse::<toml_edit::DocumentMut>()
         .map_err(|e| anyhow::anyhow!("site file is not valid TOML: {e}"))?;
 
-    // Carry over each existing server's hand-set transport, and remember the section's
-    // leading comment so we can re-attach it to the rewritten array.
+    // Carry over each existing server's hand-set transport, remember which servers are
+    // `manual` (never overwrite those), and keep the section's leading comment.
     let mut transport: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut manual_hosts: BTreeSet<String> = BTreeSet::new();
     let mut section_prefix: Option<String> = None;
     if let Some(arr) = doc.get("dns_servers").and_then(|i| i.as_array_of_tables()) {
         for (idx, t) in arr.iter().enumerate() {
@@ -39,14 +40,19 @@ pub fn merge_estate(text: &str, discovered: &[DnsServer]) -> anyhow::Result<Stri
                 let v = t.get("vantage").and_then(|x| x.as_str()).unwrap_or_default().to_string();
                 let j = t.get("jump").and_then(|x| x.as_str()).unwrap_or_default().to_string();
                 transport.insert(host.to_string(), (v, j));
+                if t.get("manual").and_then(|m| m.as_bool()) == Some(true) {
+                    manual_hosts.insert(host.to_string());
+                }
             }
         }
     }
-    let found: BTreeSet<&str> = discovered.iter().map(|s| s.host.as_str()).collect();
+    // A discovered entry for a manual host is ignored — the hand-curated one wins.
+    let write: Vec<&DnsServer> = discovered.iter().filter(|s| !manual_hosts.contains(&s.host)).collect();
+    let found: BTreeSet<&str> = write.iter().map(|s| s.host.as_str()).collect();
 
     // Build the new tables: discovered first (with preserved transport), then any existing
-    // server discovery missed.
-    let mut tables: Vec<toml_edit::Table> = discovered.iter().map(|s| server_table(s, transport.get(&s.host))).collect();
+    // server discovery missed — which includes every `manual` entry, kept verbatim.
+    let mut tables: Vec<toml_edit::Table> = write.iter().map(|s| server_table(s, transport.get(&s.host))).collect();
     if let Some(arr) = doc.get("dns_servers").and_then(|i| i.as_array_of_tables()) {
         for t in arr.iter() {
             if t.get("host").and_then(|h| h.as_str()).is_some_and(|h| !found.contains(h)) {
@@ -139,6 +145,7 @@ mod tests {
             host: host.into(),
             vantage: String::new(),
             jump: String::new(),
+            manual: false,
             forward_zones: fwd.iter().map(|z| z.to_string()).collect(),
             reverse_zones: rev.iter().map(|z| z.to_string()).collect(),
         }
@@ -174,6 +181,25 @@ forward_zones = [\"old.lofar\"]
         let hosts: Vec<&str> = cfg.dns_servers.iter().map(|s| s.host.as_str()).collect();
         assert!(hosts.contains(&"dns1.astron.nl")); // discovered added
         assert!(hosts.contains(&"manual.astron.nl")); // existing-not-discovered kept
+    }
+
+    #[test]
+    fn merge_never_overwrites_a_manual_server() {
+        let existing = "\
+[[dns_servers]]
+name = \"ntserver1\"
+host = \"ntserver1.nfra.nl\"
+manual = true
+reverse_zones = [\"10.0.0.0/8\"]
+";
+        // Discovery "found" ntserver1 with a bogus split-horizon shadow — it must be ignored.
+        let out = merge_estate(existing, &[server("ntserver1", "ntserver1.nfra.nl", &["apertif"], &[])]).unwrap();
+        let cfg: crate::config::Config = toml::from_str(&out).unwrap();
+        assert_eq!(cfg.dns_servers.len(), 1);
+        let s = &cfg.dns_servers[0];
+        assert!(s.manual);
+        assert_eq!(s.reverse_zones, vec!["10.0.0.0/8"]); // preserved verbatim
+        assert!(s.forward_zones.is_empty()); // the discovered "apertif" was NOT applied
     }
 
     #[test]

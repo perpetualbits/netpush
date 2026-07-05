@@ -60,6 +60,8 @@ probe_concurrency = 64
 #   host          the server's own hostname/IP — the `dig @host` AXFR target
 #   vantage       SSH host to reach it from (omit to use the global `vantage`)
 #   jump          SSH ProxyJump to reach it (omit to use the global `jump`)
+#   manual        true = hand-curated: --discover-dns/--save-estate skip it and never
+#                 overwrite it (pin a Windows/AD box canopy can't enumerate reliably)
 #   forward_zones domain suffixes it masters (e.g. "nfra.nl")
 #   reverse_zones reverse blocks it masters, as CIDRs (e.g. "10.0.0.0/8")
 #
