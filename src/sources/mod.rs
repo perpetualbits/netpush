@@ -21,6 +21,13 @@ use crate::reconcile::{AddressFacts, Cidr};
 
 pub use vantage::Vantage;
 
+/// Practical cap on an **address-by-address sweep** (the reverse-DNS `host` sweep and the
+/// ping probe). Above this many addresses a sweep is skipped: it would be minutes of
+/// per-address lookups, and — the reason it *crashed* — embedding that many addresses in a
+/// single remote command overflows the OS argument-length limit (`E2BIG`). Bigger blocks
+/// rely on AXFR (which transfers whole zones cheaply) and NetBox instead. ~a `/19` of IPv4.
+pub const SWEEP_CAP: u128 = 8192;
+
 /// A provider of facts about the addresses in a range.
 pub trait FactSource {
     /// Gather this source's facts for every relevant address in `range`.

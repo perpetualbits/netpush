@@ -82,6 +82,24 @@ impl NetboxSource {
         Ok(out)
     }
 
+    /// Fetch the NetBox prefixes worth **surveying** across the whole IPAM (not filtered to
+    /// a range): every prefix **except** those with `status = container`. Discovery uses
+    /// these — many NetBox installs carve the space into prefixes and leave the Aggregates
+    /// table empty, so prefixes are where the real subnets live; container prefixes (the
+    /// supernets that just group other prefixes, like a `10.0.0.0/8` parent) are skipped so
+    /// we survey their children, not the whole `/8`.
+    ///
+    /// # Errors
+    /// Propagates SSH/HTTP failures or a non-JSON body.
+    pub fn gather_survey_prefixes(&self) -> anyhow::Result<Vec<Cidr>> {
+        let first = format!("{}/api/ipam/prefixes/?limit=1000", self.base_url.trim_end_matches('/'));
+        let mut out = Vec::new();
+        for json in self.paginate(first)? {
+            out.extend(parse_survey_prefixes(&json)?);
+        }
+        Ok(out)
+    }
+
     /// Follow NetBox's `next` links from `first`, returning every page's raw JSON body.
     ///
     /// NetBox paginates list endpoints (`{count, next, results}`); a single `limit=1000`
@@ -154,6 +172,38 @@ pub fn parse_prefixes(json: &str) -> anyhow::Result<Vec<Subnet>> {
             .unwrap_or("")
             .to_string();
         out.push(Subnet { cidr, name });
+    }
+    Ok(out)
+}
+
+/// Parse a NetBox `prefixes` response into the CIDRs worth **surveying** — every prefix
+/// except those with `status = container`.
+///
+/// A container prefix models a parent range that merely groups other prefixes (an RFC1918
+/// supernet, an RIR-style parent) rather than a subnet that holds hosts, so canopy surveys
+/// its children instead of the container itself. A prefix with no `status` is kept
+/// (treated as a real subnet).
+///
+/// # Errors
+/// Fails if the body is not the expected JSON shape.
+pub fn parse_survey_prefixes(json: &str) -> anyhow::Result<Vec<Cidr>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("NetBox prefixes response was not JSON")?;
+    let results = v
+        .get("results")
+        .and_then(|r| r.as_array())
+        .context("NetBox prefixes response had no `results` array")?;
+
+    let mut out = Vec::new();
+    for obj in results {
+        let Some(cidr_str) = obj.get("prefix").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let Ok(cidr) = Cidr::parse(cidr_str) else { continue };
+        let status = obj.get("status").and_then(|s| s.get("value")).and_then(|x| x.as_str()).unwrap_or("");
+        if status == "container" {
+            continue; // a supernet grouping other prefixes, not a subnet to survey
+        }
+        out.push(cidr);
     }
     Ok(out)
 }
@@ -254,5 +304,20 @@ mod tests {
         assert_eq!(subs[0].cidr, Cidr::parse("10.87.0.0/20").unwrap());
         assert_eq!(subs[0].name, "LOFAR management");
         assert_eq!(subs[1].name, "IPMI"); // empty description → role name
+    }
+
+    #[test]
+    fn survey_prefixes_skip_containers() {
+        let json = r#"{
+            "results": [
+                {"prefix": "10.0.0.0/8",    "status": {"value": "container"}},
+                {"prefix": "10.87.0.0/20",  "status": {"value": "active"}},
+                {"prefix": "10.87.3.0/24"},
+                {"prefix": "not-a-cidr",    "status": {"value": "active"}}
+            ]
+        }"#;
+        let cidrs = parse_survey_prefixes(json).unwrap();
+        // The /8 container is skipped; the active /20 and the status-less /24 are kept; junk dropped.
+        assert_eq!(cidrs, vec![Cidr::parse("10.87.0.0/20").unwrap(), Cidr::parse("10.87.3.0/24").unwrap()]);
     }
 }

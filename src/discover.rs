@@ -101,6 +101,24 @@ pub fn infer_blocks(netbox: &[Cidr], reverse: &[Cidr]) -> Vec<DiscoveredBlock> {
     map.into_values().map(|(cidr, source)| DiscoveredBlock { cidr, source }).collect()
 }
 
+/// Whether `outer` **strictly** contains `inner`: same family, a shorter (coarser)
+/// prefix, and it covers `inner`'s network. Used to drop a subnet already inside a bigger
+/// one from the survey set.
+fn strictly_contains(outer: &Cidr, inner: &Cidr) -> bool {
+    outer.is_v6() == inner.is_v6() && outer.prefix_len < inner.prefix_len && outer.contains(inner.network())
+}
+
+/// The **coarsest covering subset** of `blocks`: drop any block strictly contained in
+/// another. Surveying the survivors still covers every dropped child, so canopy does not
+/// reconcile a `/24` and the `/20` that already includes it as two separate blocks. Pure.
+///
+/// Duplicates (identical blocks) are kept here — the exact-match dedupe in [`infer_blocks`]
+/// collapses those later.
+#[must_use]
+pub fn coarsest(blocks: &[Cidr]) -> Vec<Cidr> {
+    blocks.iter().copied().filter(|b| !blocks.iter().any(|o| strictly_contains(o, b))).collect()
+}
+
 /// The block to browse in the TUI while discovering: the first in survey order. The full
 /// set is shown by `--list` and named in the TUI status line; multi-block navigation is a
 /// later (Phase-3) view. `None` only when nothing was discovered.
@@ -128,11 +146,22 @@ pub fn summary(blocks: &[DiscoveredBlock]) -> String {
     s
 }
 
-/// Discover the address space **live**: NetBox aggregates unioned with the estate's
-/// reverse zones, via [`infer_blocks`].
+/// Discover the address space **live**: NetBox's survey prefixes (every prefix except the
+/// `container` supernets), coalesced to their coarsest covering set, unioned with the
+/// estate's reverse zones (via [`infer_blocks`]).
 ///
-/// The NetBox call runs on the vantage host (NetBox is internal-only); the reverse zones
-/// come straight from the configured estate, no query needed.
+/// Why prefixes and not aggregates: many NetBox installs leave the Aggregates table empty
+/// and describe the space as prefixes, so relying on aggregates alone finds nothing. And
+/// aggregates / container prefixes model the *parent* space (a whole `10.0.0.0/8`) — far
+/// too big to reconcile address-by-address — so canopy surveys the real subnets instead.
+/// [`coarsest`] then drops any subnet already inside a bigger surveyed one, so the set is
+/// the handful of top-level blocks rather than every nested subnet. The reverse zones are
+/// kept separate (a coarse reverse zone must not swallow the prefixes it contains).
+///
+/// The NetBox calls run on the vantage host (NetBox is internal-only); the reverse zones
+/// come straight from the configured estate. A one-line count goes to stderr — including
+/// the aggregate count, so an empty Aggregates table is visible — showing what each source
+/// contributed.
 ///
 /// # Errors
 /// Propagates the NetBox fetch failure, or a bad reverse zone in the config.
@@ -143,8 +172,20 @@ pub fn discover(cfg: &Config, token: &str) -> anyhow::Result<Vec<DiscoveredBlock
         token: token.to_string(),
     };
     let aggregates = netbox.gather_aggregates()?;
+    let prefixes = netbox.gather_survey_prefixes()?;
+    let netbox_blocks = coarsest(&prefixes);
+
     let estate = DnsEstate::from_config(&cfg.dns_servers)?;
-    Ok(infer_blocks(&aggregates, &estate.reverse_zone_blocks()))
+    let reverse = estate.reverse_zone_blocks();
+
+    eprintln!(
+        "discovery: NetBox {} aggregate(s), {} survey prefix(es) → {} top-level block(s); {} reverse zone(s)",
+        aggregates.len(),
+        prefixes.len(),
+        netbox_blocks.len(),
+        reverse.len()
+    );
+    Ok(infer_blocks(&netbox_blocks, &reverse))
 }
 
 #[cfg(test)]
@@ -180,6 +221,17 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].cidr, cidr("10.87.3.0/24"));
         assert_eq!(blocks[0].source, BlockSource::Both);
+    }
+
+    #[test]
+    fn coarsest_drops_subnets_already_inside_a_bigger_block() {
+        // The /24 and /26 sit inside the /20 → only the /20 (and the unrelated /16) survive.
+        let blocks = [cidr("10.87.0.0/20"), cidr("10.87.3.0/24"), cidr("10.87.3.0/26"), cidr("10.99.0.0/16")];
+        let top = coarsest(&blocks);
+        assert_eq!(top, vec![cidr("10.87.0.0/20"), cidr("10.99.0.0/16")]);
+        // A v4 block never swallows a v6 one, even at a shorter prefix.
+        let mixed = [cidr("0.0.0.0/0"), cidr("2001:db8::/48")];
+        assert_eq!(coarsest(&mixed), mixed.to_vec());
     }
 
     #[test]

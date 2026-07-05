@@ -81,10 +81,11 @@ impl DnsSource {
                 return Ok(facts);
             }
         }
-        // No AXFR (unset or refused): fall back to a per-address sweep, which needs to
-        // enumerate the range — impossible for a huge IPv6 block, so that gets nothing
-        // here and relies on NetBox alone.
-        if !range.is_enumerable() {
+        // No AXFR (unset or refused): fall back to a per-address sweep, which enumerates
+        // the range. That is impossible for a huge IPv6 block and impractical (and, via
+        // the remote command's argument list, unsafe) for a large IPv4 one — so anything
+        // over [`SWEEP_CAP`] gets nothing here and relies on NetBox alone.
+        if !range.is_enumerable() || range.host_count() > super::SWEEP_CAP {
             return Ok(Vec::new());
         }
         self.sweep(range, on_progress)
@@ -571,6 +572,21 @@ garbage line without ip
         assert_eq!(g2.len(), 1);
         assert_eq!(g2[0].host, "ntserver1.nfra.nl");
         assert_eq!(g2[0].vantage.host, "dns1.astron.nl"); // ntserver1 has no own vantage
+    }
+
+    #[test]
+    fn reverse_sweep_skips_a_block_too_large() {
+        use crate::sources::estate::DnsEstate;
+        // A /8 with no AXFR configured must not sweep: gather returns empty without ever
+        // contacting the (bogus) vantage — the guard against the E2BIG crash.
+        let d = DnsSource {
+            vantage: Vantage::new("nowhere.invalid"),
+            concurrency: 8,
+            axfr_server: String::new(),
+            estate: DnsEstate::default(),
+        };
+        let facts = d.gather(&Cidr::parse("10.0.0.0/8").unwrap()).unwrap();
+        assert!(facts.is_empty());
     }
 
     #[test]

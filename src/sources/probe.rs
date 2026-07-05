@@ -19,6 +19,12 @@ pub struct ProbeSource {
 
 impl FactSource for ProbeSource {
     fn gather(&self, range: &Cidr) -> anyhow::Result<Vec<AddressFacts>> {
+        // Only sweep blocks small enough to ping one address at a time. A bigger block
+        // would be minutes of pings and — embedding every address in one remote command —
+        // overflow the OS argument limit; it gets no live facts and relies on NetBox/DNS.
+        if !range.is_enumerable() || range.host_count() > super::SWEEP_CAP {
+            return Ok(Vec::new());
+        }
         let ips = range.hosts().map(|a| a.to_string()).collect::<Vec<_>>().join(" ");
         let par = self.concurrency.max(1);
         // Ping with bounded fan-out (`xargs -P`). An unbounded `for … &` would spawn one
@@ -60,5 +66,14 @@ mod tests {
         assert_eq!(facts.len(), 2);
         assert!(facts.iter().all(|f| f.live && f.ptr.is_none() && f.netbox.is_none()));
         assert_eq!(facts[0].addr, std::net::Ipv4Addr::new(10, 87, 3, 90));
+    }
+
+    #[test]
+    fn skips_a_block_too_large_to_ping() {
+        // A /8 must not be swept: gather returns empty without ever contacting the (bogus)
+        // vantage — the guard that prevents the E2BIG crash.
+        let p = ProbeSource { vantage: Vantage::new("nowhere.invalid"), concurrency: 8 };
+        let facts = p.gather(&Cidr::parse("10.0.0.0/8").unwrap()).unwrap();
+        assert!(facts.is_empty());
     }
 }
