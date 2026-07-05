@@ -1275,9 +1275,10 @@ mod tests {
         app.view = View::Map;
         let mut buf = Buffer::empty(Rect::new(0, 0, 88, 16));
         crate::tui::map::screen(&mut buf, &mut app);
-        // The scope row (frame inner height − 2 = row 13 in an 88×16 buffer) names the
-        // most-specific NetBox subnet at the cursor: 10.87.3.0 → the /26, not the /24.
-        let scope: String = (0..88).map(|x| buf.get(x, 13).symbol.clone()).collect();
+        // The scope row is now the third header row above the grid (buffer row 3: top border
+        // 0, legend 1, cursor-info 2, scope 3). It names the most-specific NetBox subnet at
+        // the cursor: 10.87.3.0 → the /26, not the /24.
+        let scope: String = (0..88).map(|x| buf.get(x, 3).symbol.clone()).collect();
         assert!(scope.contains("subnet: 10.87.3.0/26 (IPMI)"), "scope row: {scope:?}");
     }
 
