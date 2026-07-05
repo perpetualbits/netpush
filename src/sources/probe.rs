@@ -32,8 +32,12 @@ impl FactSource for ProbeSource {
         // requests simultaneously; capping the parallelism keeps a big sweep from
         // storming the subnet while still finishing a /24 in ~a second. `$0` is the
         // address xargs handed the shell. Each responder prints its own address.
+        // The trailing `|| true` matters: a non-responding host makes `ping` (and so the
+        // `sh -c`) exit non-zero, which makes `xargs` exit 123 — and canopy would read that
+        // as "ssh failed". Forcing each worker to exit 0 lets a sweep with no responders
+        // finish cleanly; genuine ssh/connection errors still surface (they exit 255).
         let remote = format!(
-            "printf '%s\\n' {ips} | xargs -P{par} -n1 sh -c 'ping -c1 -W1 \"$0\" >/dev/null 2>&1 && echo \"$0\"'"
+            "printf '%s\\n' {ips} | xargs -P{par} -n1 sh -c 'ping -c1 -W1 \"$0\" >/dev/null 2>&1 && echo \"$0\" || true'"
         );
         let out = self.vantage.run(&remote)?;
         Ok(parse_live(&out))

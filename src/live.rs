@@ -80,8 +80,14 @@ pub fn gather_live_with_token(
         .gather_with_progress(range, |frac, label| on_progress(0.05 + 0.87 * frac, label))
         .context("DNS source")?;
 
+    // The ping probe is best-effort — the probe host may not sit on the target L2, or may
+    // block ICMP — so a failure must NOT abort the whole gather (NetBox + DNS are the core).
+    // Warn and carry on with no live facts.
     on_progress(0.93, "probing the wire…");
-    let live = probe.gather(range).context("probe source")?;
+    let live = probe.gather(range).unwrap_or_else(|e| {
+        eprintln!("warning: live probe skipped ({e})");
+        Vec::new()
+    });
 
     on_progress(1.0, "merging…");
     Ok(LiveData { facts: sources::merge(vec![nb, dns_facts, live]), subnets })

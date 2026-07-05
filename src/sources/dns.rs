@@ -104,8 +104,11 @@ impl DnsSource {
     fn sweep(&self, range: &Cidr, mut on_progress: impl FnMut(f32, &str)) -> anyhow::Result<Vec<AddressFacts>> {
         let ips = host_list(range);
         let par = self.concurrency.max(1);
+        // The trailing `; true` matters: when a host has no PTR, `$h` is empty and the
+        // `[ -n "$h" ]` test exits non-zero, which makes `xargs` exit 123 — read as "ssh
+        // failed". Ending each worker with `true` lets a sweep with no PTRs finish cleanly.
         let remote = format!(
-            "printf '%s\\n' {ips} | xargs -P{par} -n1 sh -c 'h=$(host -W1 \"$0\" 2>/dev/null | sed -n \"s/.*pointer //p\"); printf \"T\\n\"; [ -n \"$h\" ] && printf \"R %s %s\\n\" \"$0\" \"$h\"'"
+            "printf '%s\\n' {ips} | xargs -P{par} -n1 sh -c 'h=$(host -W1 \"$0\" 2>/dev/null | sed -n \"s/.*pointer //p\"); printf \"T\\n\"; [ -n \"$h\" ] && printf \"R %s %s\\n\" \"$0\" \"$h\"; true'"
         );
         let total = range.host_count().max(1);
         let step = (total / 100).max(1); // update ~every 1 % rather than per address
