@@ -217,12 +217,28 @@ fn zone_entry(name: &str) -> Option<Entry> {
         return None;
     }
     if n.ends_with("in-addr.arpa") || n.ends_with("ip6.arpa") {
-        if matches!(n.as_str(), "0.in-addr.arpa" | "127.in-addr.arpa" | "255.in-addr.arpa") {
-            return None;
+        let c = reverse_zone_to_cidr(&n)?;
+        if is_reserved_reverse(&c) {
+            return None; // BIND's built-in loopback / this-host / broadcast reverse zones
         }
-        return reverse_zone_to_cidr(&n).map(|c| Entry::Reverse(format!("{}/{}", c.base, c.prefix_len)));
+        return Some(Entry::Reverse(format!("{}/{}", c.base, c.prefix_len)));
+    }
+    // Skip local / policy zones (mDNS `.local`, an RPZ like `rpz.local`) — not routable
+    // territory, just DNS-server machinery.
+    if n.ends_with(".local") || n.ends_with(".localdomain") {
+        return None;
     }
     Some(Entry::Forward(n))
+}
+
+/// Whether a reverse zone covers a reserved v4 block BIND serves by default — `0.0.0.0/8`,
+/// `127.0.0.0/8` (loopback), `255.0.0.0/8` — or the v6 loopback/unspecified. Never real
+/// estate, so it must not leak into the discovered `[[dns_servers]]`.
+fn is_reserved_reverse(c: &Cidr) -> bool {
+    match c.network() {
+        IpAddr::V4(a) => matches!(a.octets()[0], 0 | 127 | 255),
+        IpAddr::V6(a) => a.is_loopback() || a.is_unspecified(),
+    }
 }
 
 /// Read the authoritative **master** zones from a server's BIND config over SSH, as
@@ -421,6 +437,12 @@ zone \"lofar.eu\" IN {
         assert!(matches!(zone_entry("8.6.5.0.0.1.6.0.1.0.0.2.ip6.arpa"), Some(Entry::Reverse(r)) if r == "2001:610:568::/48"));
         assert!(zone_entry("localhost").is_none());
         assert!(zone_entry("127.in-addr.arpa").is_none());
+        // A loopback /24 (0.0.127.in-addr.arpa) and an RPZ/.local policy zone must not leak.
+        assert!(zone_entry("0.0.127.in-addr.arpa").is_none());
+        assert!(zone_entry("rpz.local").is_none());
+        assert!(zone_entry("0.in-addr.arpa").is_none());
+        // A real 10.x reverse is kept (it is not reserved-space).
+        assert!(matches!(zone_entry("10.in-addr.arpa"), Some(Entry::Reverse(r)) if r == "10.0.0.0/8"));
     }
 
     #[test]
