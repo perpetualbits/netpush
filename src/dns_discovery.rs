@@ -131,6 +131,18 @@ fn short_name(host: &str) -> String {
     host.split('.').next().unwrap_or(host).to_string()
 }
 
+/// Whether `host` belongs to the site — its name sits under one of the `owned` domains
+/// (`ns1.lofar.eu` under `lofar.eu`). An empty `owned` list means "keep everything" (no
+/// ownership configured). Used to drop servers a NetBox merely refers to (SURFnet's reverse
+/// master for a delegated block, a peer university, a root/blackhole server).
+fn is_ours(host: &str, owned: &[String]) -> bool {
+    if owned.is_empty() {
+        return true;
+    }
+    let h = fold(host);
+    owned.iter().any(|d| h == *d || h.ends_with(&format!(".{d}")))
+}
+
 /// Assemble the per-master forward and reverse zone maps into sorted [`DnsServer`] entries.
 fn assemble(fwd: &BTreeMap<String, BTreeSet<String>>, rev: &BTreeMap<String, BTreeSet<String>>) -> Vec<DnsServer> {
     let hosts: BTreeSet<&String> = fwd.keys().chain(rev.keys()).collect();
@@ -163,21 +175,27 @@ pub fn discover_dns_servers(cfg: &Config, token: &str, blocks: &[Cidr]) -> anyho
     let vantage = Vantage::with_jump(&cfg.vantage, &cfg.jump);
     let netbox = NetboxSource { vantage: vantage.clone(), base_url: cfg.netbox_url.clone(), token: token.to_string() };
 
+    let owned: Vec<String> = cfg.domains.iter().map(|d| fold(d)).collect();
     let mut fwd: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut rev: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-    // Forward: one SOA lookup per distinct candidate zone from the NetBox dns_names.
-    let candidates: BTreeSet<String> = netbox.gather_dns_names()?.iter().filter_map(|n| parent_domain(n)).collect();
+    // Forward candidates: the owned domains (so an owned zone is probed even if no NetBox
+    // host names it — the reason lofar.eu was missing), plus each NetBox dns_name's parent.
+    let mut candidates: BTreeSet<String> = owned.iter().cloned().collect();
+    candidates.extend(netbox.gather_dns_names()?.iter().filter_map(|n| parent_domain(n)));
     for zone in &candidates {
         if let Ok(out) = vantage.run(&format!("dig SOA {zone}")) {
             if let Some((apex, master)) = parse_soa(&out) {
-                fwd.entry(master).or_default().insert(apex);
+                if is_ours(&master, &owned) {
+                    fwd.entry(master).or_default().insert(apex);
+                }
             }
         }
     }
 
     // Reverse: one SOA lookup per block, but skip a block already inside a reverse zone we
-    // have already found (all 10.x blocks resolve to the same 10.in-addr.arpa, say).
+    // have already found (all 10.x blocks resolve to the same 10.in-addr.arpa, say). Zones
+    // mastered off-site (a SURFnet-delegated reverse block) are dropped by the owned filter.
     let mut covered: Vec<Cidr> = Vec::new();
     for b in blocks {
         let net = b.network();
@@ -187,8 +205,10 @@ pub fn discover_dns_servers(cfg: &Config, token: &str, blocks: &[Cidr]) -> anyho
         if let Ok(out) = vantage.run(&format!("dig SOA {}", reverse_name(net))) {
             if let Some((apex, master)) = parse_soa(&out) {
                 if let Some(cidr) = reverse_zone_to_cidr(&apex) {
-                    rev.entry(master).or_default().insert(format!("{}/{}", cidr.base, cidr.prefix_len));
-                    covered.push(cidr);
+                    covered.push(cidr); // mark covered even if foreign, so we don't re-probe it
+                    if is_ours(&master, &owned) {
+                        rev.entry(master).or_default().insert(format!("{}/{}", cidr.base, cidr.prefix_len));
+                    }
                 }
             }
         }
@@ -243,6 +263,24 @@ nfra.nl.\t\t900\tIN\tSOA\tDNS1.astron.nl. root.nfra.nl. 42 1 2 3 4";
             reverse_zone_to_cidr("a.a.a.a.8.b.d.0.1.0.0.2.ip6.arpa"),
             Some(Cidr::parse("2001:db8:aaaa::/48").unwrap())
         );
+    }
+
+    #[test]
+    fn ownership_filters_foreign_servers() {
+        let owned = vec!["astron.nl".to_string(), "lofar.eu".to_string(), "control.lofar".to_string()];
+        // Ours: name sits under an owned domain (case/dot folded).
+        assert!(is_ours("ns1.lofar.eu", &owned));
+        assert!(is_ours("lcs020.control.lofar", &owned));
+        assert!(is_ours("DNS1.ASTRON.NL.", &owned));
+        // Not ours: the servers your NetBox merely refers to.
+        assert!(!is_ours("ns1.surfnet.nl", &owned));
+        assert!(!is_ours("ns1.utwente.nl", &owned));
+        assert!(!is_ours("a.root-servers.net", &owned));
+        assert!(!is_ours("localhost", &owned));
+        // A near-miss must not match on a bare TLD suffix.
+        assert!(!is_ours("evil-astron.nl", &owned)); // not ".astron.nl"
+        // Empty owned list = keep everything (no ownership configured).
+        assert!(is_ours("ns1.surfnet.nl", &[]));
     }
 
     #[test]

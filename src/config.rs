@@ -48,6 +48,13 @@ pub struct Config {
     /// How many ping probes to run at once. Bounds the concurrent processes on the probe
     /// host and the ARP burst on the target L2 — the ping equivalent of `dns_concurrency`.
     pub probe_concurrency: usize,
+    /// The forward domains this **site owns** (e.g. `astron.nl`, `lofar.eu`, `control.lofar`).
+    /// Two jobs in DNS-estate discovery: they **seed** the SOA probes (so an owned zone is
+    /// looked up even when no NetBox host names it), and they **filter** the result — only
+    /// servers whose hostname sits under an owned domain are kept, so zones your NetBox
+    /// merely *refers* to (a SURFnet-delegated reverse block, a university you peer with)
+    /// don't pollute the estate. Empty = no filter (every server found is kept).
+    pub domains: Vec<String>,
     /// Authoritative server to attempt reverse-DNS **zone transfers** (AXFR) from, e.g.
     /// the reverse-zone master. When set (and transfer is permitted) one AXFR per `/24`
     /// replaces hundreds of per-address `host` lookups — far lighter on the DNS server.
@@ -107,6 +114,7 @@ impl Default for Config {
             dns_concurrency: 64,
             probe_concurrency: 64,
             reverse_axfr_server: String::new(), // off by default; needs allow-transfer
+            domains: Vec::new(), // no owned domains → discovery keeps every server it finds
             dns_servers: Vec::new(), // no estate listed → single-vantage behaviour
         }
     }

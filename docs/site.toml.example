@@ -18,6 +18,13 @@ probe_host = "bastion.astron.nl"
 
 netbox_url = "https://netbox.astron.nl"
 
+# The forward domains this site OWNS. Used by `canopy --discover-dns` to (1) seed the SOA
+# probes — so an owned zone like lofar.eu is found even if no NetBox host names it — and
+# (2) filter the result, keeping only servers under these domains. Without this, discovery
+# also picks up servers your NetBox merely refers to (SURFnet's reverse master for the
+# 145.124.0.0/16 they delegated you, a peer university, root/blackhole servers).
+domains = ["astron.nl", "nfra.nl", "camras.nl", "lofar.eu", "lofar", "control.lofar", "offline.lofar"]
+
 # The DNS estate: which server masters which zones, so canopy routes each reverse-zone
 # transfer (and, later, each forward write) to the right box. Each server may set its own
 # `vantage`/`jump`; omitted, they fall back to the site-wide values above.
