@@ -19,7 +19,7 @@ use crate::config::Config;
 use crate::reconcile::Cidr;
 use crate::sources::estate::DnsEstate;
 use crate::sources::netbox::NetboxSource;
-use crate::sources::Vantage;
+use crate::sources::{Vantage, SWEEP_CAP};
 
 /// Which source(s) reported a block — so the summary can show why we survey it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +119,45 @@ pub fn coarsest(blocks: &[Cidr]) -> Vec<Cidr> {
     blocks.iter().copied().filter(|b| !blocks.iter().any(|o| strictly_contains(o, b))).collect()
 }
 
+/// The set of blocks to actually **survey**, drilling any block too big to sweep into the
+/// prefixes inside it.
+///
+/// Coalescing to the coarsest block ([`coarsest`]) can produce one larger than an
+/// address-by-address sweep can handle — a `/13`, say — which would then reconcile with
+/// NetBox data only, no reverse-DNS or ping. So for any coarsest block over [`SWEEP_CAP`]
+/// this surveys the prefixes *strictly inside* it instead, recursively, until each surveyed
+/// block is sweepable or has no finer prefix left to drill into. A too-big block with no
+/// children is kept as-is (NetBox-only is the best that can be done for it). Pure.
+///
+/// Net effect: small subnets stay whole, a big supernet is replaced by its real child
+/// subnets (which *are* sweepable), so `--live` gets reverse/live data for them too.
+#[must_use]
+pub fn survey_set(prefixes: &[Cidr]) -> Vec<Cidr> {
+    let mut out = Vec::new();
+    drill(&coarsest(prefixes), prefixes, &mut out);
+    out
+}
+
+/// Recursive helper for [`survey_set`]: keep each root that is sweepable, otherwise drill
+/// into the coarsest prefixes strictly inside it (or keep it if there are none).
+fn drill(roots: &[Cidr], all: &[Cidr], out: &mut Vec<Cidr>) {
+    for &r in roots {
+        // Keep a block whole if it is already sweepable, or if it is IPv6 — no IPv6 block
+        // is ever small enough to sweep address-by-address, so drilling it just fragments
+        // NetBox queries and defeats a single whole-zone AXFR; keep v6 coarse.
+        if r.is_v6() || r.host_count() <= SWEEP_CAP {
+            out.push(r);
+            continue;
+        }
+        let children: Vec<Cidr> = all.iter().copied().filter(|p| strictly_contains(&r, p)).collect();
+        if children.is_empty() {
+            out.push(r); // too big to sweep and nothing finer to survey — NetBox-only
+        } else {
+            drill(&coarsest(&children), all, out);
+        }
+    }
+}
+
 /// The block to browse in the TUI while discovering: the first in survey order. The full
 /// set is shown by `--list` and named in the TUI status line; multi-block navigation is a
 /// later (Phase-3) view. `None` only when nothing was discovered.
@@ -154,9 +193,9 @@ pub fn summary(blocks: &[DiscoveredBlock]) -> String {
 /// and describe the space as prefixes, so relying on aggregates alone finds nothing. And
 /// aggregates / container prefixes model the *parent* space (a whole `10.0.0.0/8`) — far
 /// too big to reconcile address-by-address — so canopy surveys the real subnets instead.
-/// [`coarsest`] then drops any subnet already inside a bigger surveyed one, so the set is
-/// the handful of top-level blocks rather than every nested subnet. The reverse zones are
-/// kept separate (a coarse reverse zone must not swallow the prefixes it contains).
+/// [`survey_set`] coalesces subnets into the coarsest block that is still small enough to
+/// sweep, drilling any over-large block back down into its child subnets; the reverse zones
+/// are kept separate (a coarse reverse zone must not swallow the prefixes it contains).
 ///
 /// The NetBox calls run on the vantage host (NetBox is internal-only); the reverse zones
 /// come straight from the configured estate. A one-line count goes to stderr — including
@@ -173,13 +212,13 @@ pub fn discover(cfg: &Config, token: &str) -> anyhow::Result<Vec<DiscoveredBlock
     };
     let aggregates = netbox.gather_aggregates()?;
     let prefixes = netbox.gather_survey_prefixes()?;
-    let netbox_blocks = coarsest(&prefixes);
+    let netbox_blocks = survey_set(&prefixes);
 
     let estate = DnsEstate::from_config(&cfg.dns_servers)?;
     let reverse = estate.reverse_zone_blocks();
 
     eprintln!(
-        "discovery: NetBox {} aggregate(s), {} survey prefix(es) → {} top-level block(s); {} reverse zone(s)",
+        "discovery: NetBox {} aggregate(s), {} survey prefix(es) → {} block(s) to survey; {} reverse zone(s)",
         aggregates.len(),
         prefixes.len(),
         netbox_blocks.len(),
@@ -232,6 +271,39 @@ mod tests {
         // A v4 block never swallows a v6 one, even at a shorter prefix.
         let mixed = [cidr("0.0.0.0/0"), cidr("2001:db8::/48")];
         assert_eq!(coarsest(&mixed), mixed.to_vec());
+    }
+
+    #[test]
+    fn survey_set_drills_blocks_too_big_to_sweep() {
+        // A /13 (over the sweep cap) with two /24 children → survey the /24s, not the /13.
+        // A /20 (under the cap) stays whole and absorbs its own /24 child.
+        let prefixes = [
+            cidr("10.128.0.0/13"),
+            cidr("10.128.5.0/24"),
+            cidr("10.130.9.0/24"),
+            cidr("10.87.0.0/20"),
+            cidr("10.87.3.0/24"),
+        ];
+        let s = survey_set(&prefixes);
+        assert!(s.contains(&cidr("10.87.0.0/20"))); // sweepable → kept whole
+        assert!(!s.contains(&cidr("10.87.3.0/24"))); // absorbed into the /20
+        assert!(!s.contains(&cidr("10.128.0.0/13"))); // too big → drilled away
+        assert!(s.contains(&cidr("10.128.5.0/24"))); // its children surveyed instead
+        assert!(s.contains(&cidr("10.130.9.0/24")));
+    }
+
+    #[test]
+    fn survey_set_keeps_a_big_block_with_no_children() {
+        // A lone /13 with nothing finer inside it can't be drilled → kept (NetBox-only).
+        assert_eq!(survey_set(&[cidr("10.128.0.0/13")]), vec![cidr("10.128.0.0/13")]);
+    }
+
+    #[test]
+    fn survey_set_never_drills_ipv6() {
+        // A /48 is far over the cap, but IPv6 is never swept — keep it whole rather than
+        // fragment it into its (still-unsweepable) child prefixes.
+        let prefixes = [cidr("2001:db8::/48"), cidr("2001:db8:0:1::/64")];
+        assert_eq!(survey_set(&prefixes), vec![cidr("2001:db8::/48")]);
     }
 
     #[test]
