@@ -1,0 +1,41 @@
+# Example site file — copy to ~/.config/canopy/conf.d/astron.toml and select with
+# `canopy --site astron` (astron is the default site, so `canopy` alone also uses it).
+#
+# A "site" is one organization's network estate: everything in that NetBox, reached
+# through that org's vantage/jump hosts. This file is merged OVER ~/.config/canopy/config.toml,
+# so it only needs the per-org bits; personal defaults (token_pass, concurrency) can stay
+# in the base config. Point canopy at another organization by adding conf.d/<other>.toml.
+
+# Where this org's NetBox and internal DNS are reached from, and the bastion to get there.
+vantage    = "dns1.astron.nl"
+jump       = "bastion.astron.nl"        # or a chain, e.g. "portal.lofar.eu,inner.host"
+
+# On-L2 host for the ARP/ping probe (a jump host often works too — check it can reach the L2).
+probe_host = "takkie.astron.nl"
+
+netbox_url = "https://netbox.astron.nl"
+
+# The DNS estate: which server masters which zones, so canopy routes each reverse-zone
+# transfer (and, later, each forward write) to the right box. Each server may set its own
+# `vantage`/`jump`; omitted, they fall back to the site-wide values above.
+
+[[dns_servers]]
+name          = "dns1"
+host          = "dns1.astron.nl"
+forward_zones = ["nfra.nl", "astron.nl"]
+
+[[dns_servers]]
+name          = "ntserver1"                # Windows reverse master (RDP-only; PTRs are manual)
+host          = "ntserver1.nfra.nl"
+reverse_zones = ["10.0.0.0/8"]
+
+[[dns_servers]]
+name          = "lcs020"                   # LOFAR control-network DNS
+host          = "lcs020.control.lofar"
+jump          = "portal.lofar.eu"          # reached through the LOFAR portal
+forward_zones = ["control.lofar", "lofar"]
+
+[[dns_servers]]
+name          = "ns1-lofar"
+host          = "ns1.lofar.eu"
+forward_zones = ["lofar.eu"]

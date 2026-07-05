@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026  Epsilon Null Operation
-//! Optional config file at `~/.config/canopy/config.toml` (XDG-aware), mirroring
-//! census's `Config`. Every field has a built-in default, so the file is optional;
-//! any CLI flag overrides whatever the file — or the default — provides. Secrets are
-//! never stored here: the NetBox token comes from `pass` (or `$CANOPY_NETBOX_TOKEN`),
-//! and `token_pass` just names the `pass` entry.
+//! Config, layered so canopy can point at one **site** (one organization's network
+//! estate) or, later, several. Two layers, both XDG-aware and optional:
+//!
+//! 1. `~/.config/canopy/config.toml` — personal defaults (token, concurrency…).
+//! 2. `~/.config/canopy/conf.d/<site>.toml` — that site's estate (NetBox URL, vantage, jump, DNS servers).
+//!
+//! The site is chosen with `--site` (default `astron`); its file is merged over the base,
+//! and any CLI flag overrides both. Every field has a built-in default, so all files are
+//! optional. Secrets are never stored here: the NetBox token comes from `pass` (or
+//! `$CANOPY_NETBOX_TOKEN`); `token_pass` just names the `pass` entry.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +25,11 @@ pub struct Config {
     pub range: Option<String>,
     /// SSH host to run NetBox + DNS queries from (must reach both).
     pub vantage: String,
+    /// SSH `ProxyJump` chain used to reach every host canopy SSHes to (the vantage, the
+    /// probe host, and each DNS server) — e.g. `"bastion.astron.nl"` or a chain
+    /// `"portal.lofar.eu,inner"`. Empty (the default) connects directly. Per-server
+    /// overrides live on each `[[dns_servers]]` entry; `~/.ssh/config` is honoured on top.
+    pub jump: String,
     /// SSH host on the target L2 for the ARP probe.
     pub probe_host: String,
     /// NetBox base URL.
@@ -68,6 +78,8 @@ pub struct DnsServer {
     pub host: String,
     /// SSH vantage to reach this server from; empty falls back to the global `vantage`.
     pub vantage: String,
+    /// SSH `ProxyJump` chain to reach this server; empty falls back to the global `jump`.
+    pub jump: String,
     /// Forward zones this server masters, as domain suffixes (e.g. `nfra.nl`).
     pub forward_zones: Vec<String>,
     /// Reverse blocks this server masters, as CIDR strings (e.g. `10.0.0.0/8`).
@@ -79,6 +91,7 @@ impl Default for Config {
         Config {
             range: None, // unset → discover the space live; offline falls back to a demo range
             vantage: "dns1.astron.nl".into(),
+            jump: String::new(), // direct by default; a site can set a bastion chain
             probe_host: "takkie.astron.nl".into(),
             netbox_url: "https://netbox.astron.nl".into(),
             token_pass: "astron/netbox.astron.nl/dns_api_token".into(),
@@ -94,39 +107,86 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load the config.
+    /// Load the config for `site`, layering `config.toml` then `conf.d/<site>.toml`.
     ///
-    /// With an explicit `path` (from `--config`) the file must exist. Otherwise the
-    /// default `~/.config/canopy/config.toml` is used **if present**, and built-in
-    /// defaults are returned when it is absent — so canopy works with no config at
-    /// all. Any field the file omits keeps its default.
+    /// How: an explicit `--config` path is taken verbatim as the whole config (no
+    /// layering) and must exist. Otherwise the base `~/.config/canopy/config.toml` is read
+    /// if present, the site file `~/.config/canopy/conf.d/<site>.toml` is deep-merged over
+    /// it (site keys win; a whole array like `dns_servers` replaces the base's), and the
+    /// result is deserialized — any key none of them set keeps its built-in default. All
+    /// files are optional, so canopy still runs with no config at all.
     ///
     /// # Errors
-    /// Fails if an explicit config path is missing, or the file is unreadable / not
-    /// valid TOML.
-    pub fn load(explicit: Option<&Path>) -> anyhow::Result<Config> {
-        let (path, required) = match explicit {
-            Some(p) => (p.to_path_buf(), true),
-            None => (config_path(), false),
-        };
-        if !path.exists() {
-            if required {
-                anyhow::bail!("config file not found: {}", path.display());
+    /// Fails if an explicit config path is missing, or any present file is unreadable or
+    /// not valid TOML.
+    pub fn load(explicit: Option<&Path>, site: &str) -> anyhow::Result<Config> {
+        if let Some(p) = explicit {
+            if !p.exists() {
+                anyhow::bail!("config file not found: {}", p.display());
             }
-            return Ok(Config::default());
+            let text = std::fs::read_to_string(p)?;
+            return toml::from_str(&text).map_err(|e| anyhow::anyhow!("config parse error in {}: {e}", p.display()));
         }
-        let text = std::fs::read_to_string(&path)?;
-        toml::from_str(&text).map_err(|e| anyhow::anyhow!("config parse error in {}: {e}", path.display()))
+
+        let mut merged = toml::value::Table::new();
+        if let Some(base) = read_table(&config_path())? {
+            merge_table(&mut merged, base);
+        }
+        if let Some(over) = read_table(&site_path(site))? {
+            merge_table(&mut merged, over);
+        }
+        toml::Value::Table(merged).try_into().map_err(|e| anyhow::anyhow!("config error: {e}"))
     }
 }
 
-/// `$XDG_CONFIG_HOME/canopy/config.toml`, falling back to `~/.config/canopy/…`.
+/// Read a TOML file into a table, or `None` if the file is absent.
+///
+/// # Errors
+/// Fails if the file is unreadable, not valid TOML, or not a table at the top level.
+fn read_table(path: &Path) -> anyhow::Result<Option<toml::value::Table>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)?;
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|e| anyhow::anyhow!("config parse error in {}: {e}", path.display()))?;
+    match value {
+        toml::Value::Table(t) => Ok(Some(t)),
+        _ => anyhow::bail!("config {} is not a table", path.display()),
+    }
+}
+
+/// Deep-merge `over` into `base`: nested tables merge key-by-key; anything else (a scalar
+/// or an array) replaces wholesale. So a site file overrides just the keys it sets, while
+/// a whole `[[dns_servers]]` array replaces the base's — each site defines its own servers.
+fn merge_table(base: &mut toml::value::Table, over: toml::value::Table) {
+    for (k, v) in over {
+        match (base.get_mut(&k), v) {
+            (Some(toml::Value::Table(bt)), toml::Value::Table(vt)) => merge_table(bt, vt),
+            (_, v) => {
+                base.insert(k, v);
+            }
+        }
+    }
+}
+
+/// The XDG config directory: `$XDG_CONFIG_HOME`, falling back to `~/.config`.
+fn config_dir() -> PathBuf {
+    std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"))
+}
+
+/// `<config-dir>/canopy/config.toml` — the personal base layer.
 #[must_use]
 pub fn config_path() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
-    });
-    base.join("canopy").join("config.toml")
+    config_dir().join("canopy").join("config.toml")
+}
+
+/// `<config-dir>/canopy/conf.d/<site>.toml` — one organization's estate.
+#[must_use]
+pub fn site_path(site: &str) -> PathBuf {
+    config_dir().join("canopy").join("conf.d").join(format!("{site}.toml"))
 }
 
 #[cfg(test)]
@@ -152,6 +212,35 @@ mod tests {
     #[test]
     fn path_lands_under_canopy() {
         assert!(config_path().ends_with("canopy/config.toml"));
+    }
+
+    #[test]
+    fn site_path_lands_in_conf_d() {
+        assert!(site_path("astron").ends_with("canopy/conf.d/astron.toml"));
+    }
+
+    #[test]
+    fn site_layer_overrides_only_the_keys_it_sets() {
+        // Base sets vantage + netbox_url; the site overrides vantage and adds a jump host.
+        let mut merged: toml::value::Table =
+            toml::from_str("vantage = \"dns1\"\nnetbox_url = \"https://a\"\n").unwrap();
+        let over: toml::value::Table = toml::from_str("vantage = \"dns2\"\njump = \"bastion.astron.nl\"\n").unwrap();
+        merge_table(&mut merged, over);
+        let cfg: Config = toml::Value::Table(merged).try_into().unwrap();
+        assert_eq!(cfg.vantage, "dns2"); // site overrode
+        assert_eq!(cfg.jump, "bastion.astron.nl"); // site added
+        assert_eq!(cfg.netbox_url, "https://a"); // base kept
+        assert_eq!(cfg.probe_host, "takkie.astron.nl"); // neither set → default
+    }
+
+    #[test]
+    fn site_dns_servers_replace_the_base_array() {
+        let mut base: toml::value::Table = toml::from_str("[[dns_servers]]\nname = \"old\"\n").unwrap();
+        let over: toml::value::Table = toml::from_str("[[dns_servers]]\nname = \"new\"\n").unwrap();
+        merge_table(&mut base, over);
+        let cfg: Config = toml::Value::Table(base).try_into().unwrap();
+        assert_eq!(cfg.dns_servers.len(), 1); // replaced, not appended
+        assert_eq!(cfg.dns_servers[0].name, "new");
     }
 
     #[test]

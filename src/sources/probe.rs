@@ -72,7 +72,7 @@ mod tests {
     fn skips_a_block_too_large_to_ping() {
         // A /8 must not be swept: gather returns empty without ever contacting the (bogus)
         // vantage — the guard that prevents the E2BIG crash.
-        let p = ProbeSource { vantage: Vantage::new("nowhere.invalid"), concurrency: 8 };
+        let p = ProbeSource { vantage: Vantage::with_jump("nowhere.invalid", ""), concurrency: 8 };
         let facts = p.gather(&Cidr::parse("10.0.0.0/8").unwrap()).unwrap();
         assert!(facts.is_empty());
     }

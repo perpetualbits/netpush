@@ -57,7 +57,8 @@ pub fn gather_live_with_token(
     token: String,
     on_progress: impl Fn(f32, &str),
 ) -> anyhow::Result<LiveData> {
-    let vantage = Vantage::new(&cfg.vantage);
+    // Every SSH target is reached through the site's jump bastion chain (empty = direct).
+    let vantage = Vantage::with_jump(&cfg.vantage, &cfg.jump);
     let netbox = NetboxSource { vantage: vantage.clone(), base_url: cfg.netbox_url.clone(), token };
     let dns = DnsSource {
         vantage: vantage.clone(),
@@ -65,7 +66,7 @@ pub fn gather_live_with_token(
         axfr_server: cfg.reverse_axfr_server.clone(),
         estate: DnsEstate::from_config(&cfg.dns_servers)?,
     };
-    let probe = ProbeSource { vantage: Vantage::new(&cfg.probe_host), concurrency: cfg.probe_concurrency };
+    let probe = ProbeSource { vantage: Vantage::with_jump(&cfg.probe_host, &cfg.jump), concurrency: cfg.probe_concurrency };
 
     on_progress(0.0, "querying NetBox…");
     let nb = netbox.gather(range).context("NetBox source")?;

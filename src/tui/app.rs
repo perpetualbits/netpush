@@ -541,9 +541,10 @@ impl App {
         };
         let (tx, rx) = mpsc::channel();
         let vantage = self.cfg.vantage.clone();
+        let jump = self.cfg.jump.clone();
         let token_pass = self.cfg.token_pass.clone();
         std::thread::spawn(move || {
-            let res = live::get_token(&token_pass).and_then(|tok| plan.apply(&Vantage::new(&vantage), &tok));
+            let res = live::get_token(&token_pass).and_then(|tok| plan.apply(&Vantage::with_jump(&vantage, &jump), &tok));
             let _ = tx.send(res);
         });
         self.apply_rx = Some(rx);

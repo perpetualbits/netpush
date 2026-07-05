@@ -2,6 +2,12 @@
 # Every key is optional; omitted keys keep their built-in default (shown below).
 # CLI flags (--vantage, --range, …) override anything set here.
 #
+# SITES: to point canopy at a specific organization's estate, put that estate in
+# ~/.config/canopy/conf.d/<site>.toml and select it with `canopy --site <name>`
+# (default: astron). The site file is merged OVER this base config, so keep personal
+# defaults (token_pass, concurrency) here and the per-org bits (netbox_url, vantage, jump,
+# dns_servers) in the site file. See docs/site.toml.example.
+#
 # No secrets live here: the NetBox token is fetched from `pass` (the entry named by
 # `token_pass`) or the $CANOPY_NETBOX_TOKEN environment variable.
 
@@ -13,6 +19,12 @@
 
 # SSH host to run NetBox + DNS queries from (must reach NetBox and internal DNS).
 vantage    = "dns1.astron.nl"
+
+# SSH ProxyJump chain to reach every host canopy SSHes to (vantage, probe, DNS servers),
+# e.g. "bastion.astron.nl" or a chain "portal.lofar.eu,inner.host". Empty (default) means
+# connect directly. Per-server overrides live on each [[dns_servers]] entry, and your
+# ~/.ssh/config is still honoured on top.
+# jump = "bastion.astron.nl"
 
 # SSH host on the target L2 to run the ARP/ping probe from.
 probe_host = "takkie.astron.nl"
@@ -47,6 +59,7 @@ probe_concurrency = 64
 #   name          short label for logs / the plan preview
 #   host          the server's own hostname/IP — the `dig @host` AXFR target
 #   vantage       SSH host to reach it from (omit to use the global `vantage`)
+#   jump          SSH ProxyJump to reach it (omit to use the global `jump`)
 #   forward_zones domain suffixes it masters (e.g. "nfra.nl")
 #   reverse_zones reverse blocks it masters, as CIDRs (e.g. "10.0.0.0/8")
 #

@@ -34,9 +34,15 @@ use sources::Vantage;
 #[derive(Parser, Debug)]
 #[command(name = "canopy", about = "Reconcile IP allocation across NetBox, DNS and the live network")]
 struct Args {
-    /// Config file (default: ~/.config/canopy/config.toml if present).
+    /// Config file (default: ~/.config/canopy/config.toml if present). Given, it is used
+    /// verbatim and the per-site layer is skipped.
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
+
+    /// Which site (organization estate) to use — layers ~/.config/canopy/conf.d/<site>.toml
+    /// over the base config.
+    #[arg(long, value_name = "NAME", default_value = "astron")]
+    site: String,
 
     /// CIDR range to browse. Overrides the config's `range`. When neither is set and
     /// `--live` is given, canopy discovers the address space from the sources instead.
@@ -94,8 +100,8 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // Load the config (optional), then let any CLI flag override it.
-    let mut cfg = Config::load(args.config.as_deref())?;
+    // Load the config for the selected site (optional), then let any CLI flag override it.
+    let mut cfg = Config::load(args.config.as_deref(), &args.site)?;
     if let Some(v) = &args.vantage {
         cfg.vantage = v.clone();
     }
@@ -224,7 +230,7 @@ fn run_allocation(range: Cidr, args: &Args, cfg: &Config, facts: &[AddressFacts]
     if args.write && !args.dry_run {
         eprintln!("--write: applying on {} …", cfg.vantage);
         let token = live::get_token(&cfg.token_pass)?;
-        let log = plan.apply(&Vantage::new(&cfg.vantage), &token)?;
+        let log = plan.apply(&Vantage::with_jump(&cfg.vantage, &cfg.jump), &token)?;
         print!("{log}");
         eprintln!("done.");
     } else {

@@ -217,7 +217,8 @@ impl Plan {
                 continue;
             }
             let host = a.host.clone().unwrap_or_else(|| default_vantage.host.clone());
-            let vantage = Vantage::new(host);
+            // Reach each action's server through the same jump bastion as the default vantage.
+            let vantage = Vantage::with_jump(host, default_vantage.jump.clone());
             let out = if a.needs_token {
                 vantage.run_with_stdin(&a.script, &format!("{token}\n"))?
             } else {

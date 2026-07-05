@@ -15,13 +15,38 @@ use anyhow::{bail, Context};
 pub struct Vantage {
     /// The SSH destination, e.g. `"dns1.astron.nl"` — resolved through `~/.ssh/config`.
     pub host: String,
+    /// Optional SSH `ProxyJump` chain to reach `host` through a bastion, e.g.
+    /// `"bastion.astron.nl"` or a chain `"portal.lofar.eu,inner.host"`. Empty = connect
+    /// directly. Passed as `ssh -J <jump>`; `~/.ssh/config` is still honoured on top.
+    pub jump: String,
 }
 
 impl Vantage {
-    /// Make a vantage for `host`.
+    /// Make a vantage for `host`, reached through the `jump` bastion chain — an empty
+    /// `jump` means connect directly.
     #[must_use]
-    pub fn new(host: impl Into<String>) -> Self {
-        Self { host: host.into() }
+    pub fn with_jump(host: impl Into<String>, jump: impl Into<String>) -> Self {
+        Self { host: host.into(), jump: jump.into() }
+    }
+
+    /// The full `ssh` argument list for running `remote_cmd` on this vantage: the fixed
+    /// non-interactive options, a `-J <jump>` when a jump chain is set, then the host and
+    /// the command. Pure, so the jump wiring is unit-testable without spawning ssh.
+    #[must_use]
+    fn ssh_argv(&self, remote_cmd: &str) -> Vec<String> {
+        let mut argv = vec![
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            "ConnectTimeout=20".into(),
+        ];
+        if !self.jump.is_empty() {
+            argv.push("-J".into());
+            argv.push(self.jump.clone());
+        }
+        argv.push(self.host.clone());
+        argv.push(remote_cmd.to_string());
+        argv
     }
 
     /// Run `remote_cmd` on the vantage and return its stdout.
@@ -49,12 +74,7 @@ impl Vantage {
     /// Fails if ssh cannot be spawned, or the remote command exits non-zero.
     pub fn run_streaming(&self, remote_cmd: &str, mut on_line: impl FnMut(&str)) -> anyhow::Result<()> {
         let mut child = Command::new("ssh")
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("ConnectTimeout=20")
-            .arg(&self.host)
-            .arg(remote_cmd)
+            .args(self.ssh_argv(remote_cmd))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -81,12 +101,7 @@ impl Vantage {
     /// writing `stdin` to the child. Non-interactive so it never hangs on a prompt.
     fn run_inner(&self, remote_cmd: &str, stdin: Option<&str>) -> anyhow::Result<String> {
         let mut child = Command::new("ssh")
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("ConnectTimeout=20")
-            .arg(&self.host)
-            .arg(remote_cmd)
+            .args(self.ssh_argv(remote_cmd))
             .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -108,5 +123,30 @@ impl Vantage {
             bail!("ssh {} failed: {}", self.host, err.trim());
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_argv_is_direct_without_a_jump() {
+        let v = Vantage::with_jump("dns1.astron.nl", "");
+        let argv = v.ssh_argv("echo hi");
+        assert!(!argv.iter().any(|a| a == "-J")); // no ProxyJump
+        // Host and command are the last two arguments.
+        assert_eq!(&argv[argv.len() - 2..], &["dns1.astron.nl".to_string(), "echo hi".to_string()]);
+    }
+
+    #[test]
+    fn ssh_argv_inserts_proxyjump_before_the_host() {
+        let v = Vantage::with_jump("lcs020.control.lofar", "portal.lofar.eu");
+        let argv = v.ssh_argv("dig +short SOA lofar");
+        let j = argv.iter().position(|a| a == "-J").expect("a -J flag");
+        assert_eq!(argv[j + 1], "portal.lofar.eu"); // the jump chain follows -J
+        // -J comes before the destination host, as ssh requires.
+        let h = argv.iter().position(|a| a == "lcs020.control.lofar").unwrap();
+        assert!(j < h);
     }
 }

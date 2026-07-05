@@ -210,7 +210,7 @@ pub fn summary(blocks: &[DiscoveredBlock]) -> String {
 /// Propagates the NetBox fetch failure, or a bad reverse zone in the config.
 pub fn discover(cfg: &Config, token: &str) -> anyhow::Result<Vec<DiscoveredBlock>> {
     let netbox = NetboxSource {
-        vantage: Vantage::new(&cfg.vantage),
+        vantage: Vantage::with_jump(&cfg.vantage, &cfg.jump),
         base_url: cfg.netbox_url.clone(),
         token: token.to_string(),
     };

@@ -186,14 +186,22 @@ impl DnsSource {
         let mut groups: Vec<ReverseGroup> = Vec::new();
         for z in zones {
             let owner = zone_network(z).and_then(|addr| self.estate.reverse_owner(addr));
-            let (vantage_host, host) = match owner {
-                Some(s) => (s.vantage_or(&self.vantage.host).to_string(), s.host.clone()),
-                None if !self.axfr_server.is_empty() => (self.vantage.host.clone(), self.axfr_server.clone()),
+            // Each server carries its own vantage + jump, falling back to the site's when
+            // unset; an unowned zone uses the default vantage/jump and the fallback server.
+            let (vantage_host, jump, host) = match owner {
+                Some(s) => (
+                    s.vantage_or(&self.vantage.host).to_string(),
+                    s.jump_or(&self.vantage.jump).to_string(),
+                    s.host.clone(),
+                ),
+                None if !self.axfr_server.is_empty() => {
+                    (self.vantage.host.clone(), self.vantage.jump.clone(), self.axfr_server.clone())
+                }
                 None => continue, // unroutable and no fallback → left to the sweep
             };
-            match groups.iter_mut().find(|g| g.vantage.host == vantage_host && g.host == host) {
+            match groups.iter_mut().find(|g| g.vantage.host == vantage_host && g.vantage.jump == jump && g.host == host) {
                 Some(g) => g.zones.push(z.clone()),
-                None => groups.push(ReverseGroup { vantage: Vantage::new(vantage_host), host, zones: vec![z.clone()] }),
+                None => groups.push(ReverseGroup { vantage: Vantage::with_jump(vantage_host, jump), host, zones: vec![z.clone()] }),
             }
         }
         groups
@@ -533,7 +541,8 @@ garbage line without ip
     fn routing_groups_zones_by_owning_server() {
         use crate::config::DnsServer;
         use crate::sources::estate::DnsEstate;
-        // ntserver1 masters all of 10/8; a tighter server masters 10.87/16.
+        // ntserver1 masters all of 10/8 (no own vantage/jump); a tighter server masters
+        // 10.87/16 and is reached over its own vantage and jump bastion.
         let estate = DnsEstate::from_config(&[
             DnsServer {
                 name: "ntserver1".into(),
@@ -541,37 +550,42 @@ garbage line without ip
                 vantage: String::new(),
                 forward_zones: vec![],
                 reverse_zones: vec!["10.0.0.0/8".into()],
+                ..DnsServer::default()
             },
             DnsServer {
                 name: "sub16".into(),
                 host: "sub16.astron.nl".into(),
                 vantage: "jump.astron.nl".into(),
+                jump: "portal.lofar.eu".into(),
                 forward_zones: vec![],
                 reverse_zones: vec!["10.87.0.0/16".into()],
             },
         ])
         .unwrap();
+        // The site's default vantage carries a jump bastion the servers can fall back to.
         let dns = DnsSource {
-            vantage: Vantage::new("dns1.astron.nl"),
+            vantage: Vantage::with_jump("dns1.astron.nl", "bastion.astron.nl"),
             concurrency: 8,
             axfr_server: String::new(),
             estate,
         };
-        // A /20 in 10.87 → all its /24 zones route to the tighter sub16 server (@its host,
-        // via its own vantage).
+        // A /20 in 10.87 → all its /24 zones route to sub16, over its own vantage + jump.
         let z20 = reverse_zones(&Cidr::parse("10.87.0.0/20").unwrap());
         let groups = dns.route_reverse_zones(&z20);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].host, "sub16.astron.nl");
         assert_eq!(groups[0].vantage.host, "jump.astron.nl");
+        assert_eq!(groups[0].vantage.jump, "portal.lofar.eu"); // its own jump
         assert_eq!(groups[0].zones.len(), 16);
 
-        // A /24 in 10.200 (only inside 10/8) → ntserver1, reached over the default vantage.
+        // A /24 in 10.200 (only inside 10/8) → ntserver1, over the site's default vantage
+        // and jump (it sets neither of its own).
         let z24 = reverse_zones(&Cidr::parse("10.200.4.0/24").unwrap());
         let g2 = dns.route_reverse_zones(&z24);
         assert_eq!(g2.len(), 1);
         assert_eq!(g2[0].host, "ntserver1.nfra.nl");
-        assert_eq!(g2[0].vantage.host, "dns1.astron.nl"); // ntserver1 has no own vantage
+        assert_eq!(g2[0].vantage.host, "dns1.astron.nl"); // fell back to the site vantage
+        assert_eq!(g2[0].vantage.jump, "bastion.astron.nl"); // fell back to the site jump
     }
 
     #[test]
@@ -580,7 +594,7 @@ garbage line without ip
         // A /8 with no AXFR configured must not sweep: gather returns empty without ever
         // contacting the (bogus) vantage — the guard against the E2BIG crash.
         let d = DnsSource {
-            vantage: Vantage::new("nowhere.invalid"),
+            vantage: Vantage::with_jump("nowhere.invalid", ""),
             concurrency: 8,
             axfr_server: String::new(),
             estate: DnsEstate::default(),
@@ -594,7 +608,7 @@ garbage line without ip
         use crate::sources::estate::DnsEstate;
         // No estate servers, but a default axfr_server → every zone routes there.
         let with_default = DnsSource {
-            vantage: Vantage::new("dns1.astron.nl"),
+            vantage: Vantage::with_jump("dns1.astron.nl", ""),
             concurrency: 8,
             axfr_server: "default-axfr.astron.nl".into(),
             estate: DnsEstate::default(),
@@ -606,7 +620,7 @@ garbage line without ip
 
         // No estate and no default → nothing is routable (the caller sweeps instead).
         let none = DnsSource {
-            vantage: Vantage::new("dns1.astron.nl"),
+            vantage: Vantage::with_jump("dns1.astron.nl", ""),
             concurrency: 8,
             axfr_server: String::new(),
             estate: DnsEstate::default(),

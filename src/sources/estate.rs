@@ -24,6 +24,8 @@ pub struct EstateServer {
     pub host: String,
     /// SSH vantage to reach it on; empty means "use the global vantage".
     pub vantage: String,
+    /// SSH `ProxyJump` chain to reach it; empty means "use the global jump".
+    pub jump: String,
     /// Forward zones mastered here, normalized (lower-case, no leading/trailing dot).
     pub forward_zones: Vec<String>,
     /// Reverse blocks mastered here, parsed as CIDRs.
@@ -38,6 +40,17 @@ impl EstateServer {
             default
         } else {
             &self.vantage
+        }
+    }
+
+    /// The SSH `ProxyJump` chain to reach this server: its own `jump`, or `default` (the
+    /// site-wide jump) when unset.
+    #[must_use]
+    pub fn jump_or<'a>(&'a self, default: &'a str) -> &'a str {
+        if self.jump.is_empty() {
+            default
+        } else {
+            &self.jump
         }
     }
 }
@@ -74,6 +87,7 @@ impl DnsEstate {
                 name: s.name.clone(),
                 host: s.host.clone(),
                 vantage: s.vantage.clone(),
+                jump: s.jump.clone(),
                 forward_zones: s.forward_zones.iter().map(|z| normalize_zone(z)).collect(),
                 reverse_blocks,
             });
@@ -202,6 +216,7 @@ mod tests {
                 vantage: String::new(),
                 forward_zones: vec!["NFRA.nl.".into(), "astron.nl".into()],
                 reverse_zones: vec![],
+                ..DnsServer::default()
             },
             DnsServer {
                 name: "ntserver1".into(),
@@ -209,6 +224,7 @@ mod tests {
                 vantage: "jump.astron.nl".into(),
                 forward_zones: vec![],
                 reverse_zones: vec!["10.0.0.0/8".into()],
+                ..DnsServer::default()
             },
             DnsServer {
                 name: "sub16".into(),
@@ -216,6 +232,7 @@ mod tests {
                 vantage: String::new(),
                 forward_zones: vec!["sub.nfra.nl".into()],
                 reverse_zones: vec!["10.87.0.0/16".into()],
+                ..DnsServer::default()
             },
         ];
         DnsEstate::from_config(&servers).unwrap()
@@ -273,6 +290,7 @@ mod tests {
             vantage: String::new(),
             forward_zones: vec![],
             reverse_zones: vec!["not-a-cidr".into()],
+            ..DnsServer::default()
         }];
         assert!(DnsEstate::from_config(&servers).is_err());
     }
