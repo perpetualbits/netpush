@@ -102,13 +102,6 @@ impl DnsEstate {
         self.servers.is_empty()
     }
 
-    /// Every reverse block the estate's servers master — the reverse side of the address
-    /// space, for discovery to survey when no `--range` is given. Order follows the config.
-    #[must_use]
-    pub fn reverse_zone_blocks(&self) -> Vec<Cidr> {
-        self.servers.iter().flat_map(|s| s.reverse_blocks.iter().copied()).collect()
-    }
-
     /// The server that masters the reverse zone `addr` falls in — the one whose reverse
     /// block contains `addr` with the **longest prefix** — or `None` if no server claims
     /// it (the caller then falls back to the default AXFR server / resolver).

@@ -265,10 +265,12 @@ fn run_discovery(args: &Args, cfg: &Config) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // The TUI is single-block for now: browse the first discovered block and name the set.
+    // Interim overview until the navigable estate view lands: print every discovered range
+    // to stderr (scrolls above the TUI), then open on one. Browse any other with --range.
+    eprint!("{}", discover::summary(&blocks));
     let primary = discover::primary(&blocks).context("no primary block to browse")?;
     let note = format!(
-        "discovered {} block(s); browsing {}/{} — see --list for all",
+        "{} ranges discovered; browsing {}/{}. Others: canopy --live --range <cidr>",
         blocks.len(),
         primary.cidr.base,
         primary.cidr.prefix_len

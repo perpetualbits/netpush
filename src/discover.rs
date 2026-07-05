@@ -17,7 +17,6 @@ use std::net::IpAddr;
 
 use crate::config::Config;
 use crate::reconcile::Cidr;
-use crate::sources::estate::DnsEstate;
 use crate::sources::netbox::NetboxSource;
 use crate::sources::{Vantage, SWEEP_CAP};
 
@@ -218,17 +217,16 @@ pub fn discover(cfg: &Config, token: &str) -> anyhow::Result<Vec<DiscoveredBlock
     let prefixes = netbox.gather_survey_prefixes()?;
     let netbox_blocks = survey_set(&prefixes);
 
-    let estate = DnsEstate::from_config(&cfg.dns_servers)?;
-    let reverse = estate.reverse_zone_blocks();
-
+    // Reverse zones are AXFR routing hints (which server masters which PTR block), NOT
+    // survey targets — surveying a coarse reverse zone like 10.0.0.0/8 buries every real
+    // subnet under one 16 M-address block. The space to survey comes from NetBox prefixes.
     eprintln!(
-        "Discovery: NetBox {} aggregate(s), {} survey prefix(es) -> {} block(s) to survey; {} reverse zone(s)",
+        "Discovery: NetBox {} aggregate(s), {} survey prefix(es) -> {} block(s) to survey.",
         aggregates.len(),
         prefixes.len(),
         netbox_blocks.len(),
-        reverse.len()
     );
-    Ok(infer_blocks(&netbox_blocks, &reverse))
+    Ok(infer_blocks(&netbox_blocks, &[]))
 }
 
 #[cfg(test)]
