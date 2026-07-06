@@ -653,15 +653,10 @@ impl App {
     fn on_key_map(&mut self, code: KeyCode) {
         let (last_x, last_y) = (self.map_dims.0.saturating_sub(1), self.map_dims.1.saturating_sub(1));
         match code {
-            KeyCode::Char('q') => self.quit = true,
-            // Esc zooms out if zoomed in, otherwise quits.
-            KeyCode::Esc => {
-                if self.zoom_stack.is_empty() {
-                    self.quit = true;
-                } else {
-                    self.zoom_out();
-                }
-            }
+            KeyCode::Char('q') | KeyCode::Char('Q') => self.quit = true,
+            // Esc only ever zooms out — never quits, so an extra zoom-out is harmless. Only q/Q
+            // leave canopy.
+            KeyCode::Esc => self.zoom_out(),
             KeyCode::Left | KeyCode::Char('h') => self.map_cur.0 = self.map_cur.0.saturating_sub(1),
             KeyCode::Right | KeyCode::Char('l') => self.map_cur.0 = (self.map_cur.0 + 1).min(last_x),
             KeyCode::Up | KeyCode::Char('k') => self.map_cur.1 = self.map_cur.1.saturating_sub(1),
@@ -774,14 +769,9 @@ impl App {
         self.tree_cur = self.tree_cur.min(rows.len() - 1);
         let row = &rows[self.tree_cur];
         match code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc => {
-                if self.detail {
-                    self.detail = false;
-                } else {
-                    self.quit = true;
-                }
-            }
+            KeyCode::Char('q') | KeyCode::Char('Q') => self.quit = true,
+            // Esc closes the inspect panel if open; never quits (only q/Q do).
+            KeyCode::Esc => self.detail = false,
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.tree_cur + 1 < rows.len() {
                     self.tree_cur += 1;
@@ -830,15 +820,9 @@ impl App {
     fn on_key_table(&mut self, code: KeyCode) {
         let len = self.table_len();
         match code {
-            KeyCode::Char('q') => self.quit = true,
-            // Esc closes the inspect panel if open, otherwise quits.
-            KeyCode::Esc => {
-                if self.detail {
-                    self.detail = false;
-                } else {
-                    self.quit = true;
-                }
-            }
+            KeyCode::Char('q') | KeyCode::Char('Q') => self.quit = true,
+            // Esc closes the inspect panel if open; never quits (only q/Q do).
+            KeyCode::Esc => self.detail = false,
             KeyCode::Enter => self.detail = !self.detail,
             KeyCode::Char('a') => self.start_alloc(),
             KeyCode::Char('j') | KeyCode::Down => self.cur.down(len),
@@ -857,7 +841,7 @@ impl App {
         let (cw, ch) = self.graph_canvas.size();
         const STEP: u16 = 4;
         match code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') | KeyCode::Char('Q') => self.quit = true,
             KeyCode::Left | KeyCode::Char('h') => self.pan.0 = self.pan.0.saturating_sub(STEP),
             KeyCode::Right | KeyCode::Char('l') => self.pan.0 = (self.pan.0 + STEP).min(cw.saturating_sub(1)),
             KeyCode::Up | KeyCode::Char('k') => self.pan.1 = self.pan.1.saturating_sub(STEP),
