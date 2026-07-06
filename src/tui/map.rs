@@ -23,9 +23,6 @@
 //! zooms back out, so a few steps take a `/8` down to where the table and tree resolve to
 //! single addresses.
 
-use std::collections::HashMap;
-use std::net::IpAddr;
-
 use mullion::border::{BorderStyle, CornerStyle, LineWeight};
 use mullion::curve_map;
 use mullion::style::Color;
@@ -36,7 +33,7 @@ use super::draw::{btxt, keyhints};
 use super::palette::KNOBS;
 use super::theme::{s_accent, s_dim, s_title};
 use crate::map::MapGrid;
-use crate::reconcile::{self, AddrRange, AddressFacts, Subnet};
+use crate::reconcile::{AddrRange, Subnet};
 
 // The Gilbert grid geometry — cell sizing, the rounded curve glyphs, and the per-cell paint
 // loop — now lives in [`mullion::curve_map`]; this view only supplies what a cell *means*
@@ -134,16 +131,14 @@ fn toward_yellow(c: Color, amount: f32) -> Color {
     Color::Rgb(lerp(r0, 255), lerp(g0, 255), lerp(b0, 0))
 }
 
-/// Draw the information pane beside the Gilbert square: what the whole view holds, the subnet, the
-/// selected quadrant (what `Enter` would zoom into), and the zoom path. A light rule separates it.
+/// Draw the information pane beside the Gilbert square (text left-aligned to the square, no
+/// divider): VIEW, PATH, SUBNET, QUADRANT, then a scrollable host list. The palette lives in the
+/// square's edge, not here.
 fn draw_info_pane(buf: &mut Buffer, pane: Rect, app: &App, grid: &MapGrid, quads: &[(std::ops::Range<usize>, Rect)], used_total: u32) {
-    for row in pane.y..pane.y + pane.height {
-        buf.set_char(pane.x, row, '│', s_dim());
-    }
-    let (x, w) = (pane.x + 2, pane.width.saturating_sub(3));
+    let (x, w, bottom) = (pane.x, pane.width, pane.y + pane.height);
     let mut y = pane.y;
     let line = |buf: &mut Buffer, y: &mut u16, text: &str, style| {
-        if *y < pane.y + pane.height {
+        if *y < bottom {
             btxt(buf, x, *y, &clip(text, w), style);
         }
         *y += 1;
@@ -153,8 +148,11 @@ fn draw_info_pane(buf: &mut Buffer, pane: Rect, app: &App, grid: &MapGrid, quads
     let cell_addrs = addrs / grid.cells().max(1) as u128;
     line(buf, &mut y, "VIEW", s_title());
     line(buf, &mut y, &app.range.label(), s_accent());
-    line(buf, &mut y, &format!("{used_total} used / {addrs} addr"), s_dim());
-    line(buf, &mut y, &format!("{} cells · {cell_addrs}/cell", grid.cells()), s_dim());
+    line(buf, &mut y, &format!("{used_total} used / {addrs} addr · {}/cell", cell_addrs), s_dim());
+    y += 1;
+
+    line(buf, &mut y, "PATH", s_title());
+    line(buf, &mut y, &app.scope_chain().iter().map(mullion_label).collect::<Vec<_>>().join(" › "), s_dim());
     y += 1;
 
     if let Some(s) = Subnet::most_specific(&app.subnets, app.range.base()) {
@@ -169,24 +167,21 @@ fn draw_info_pane(buf: &mut Buffer, pane: Rect, app: &App, grid: &MapGrid, quads
         let used: u32 = (dr.start..dr.end).filter_map(|d| grid.used.get(d)).sum();
         line(buf, &mut y, &format!("QUADRANT {}/{}", app.zoom_sel + 1, quads.len()), s_title());
         line(buf, &mut y, &q.label(), s_accent());
-        line(buf, &mut y, &format!("{} – {}", q.base(), q.last()), s_dim());
-        line(buf, &mut y, &format!("{used} used"), s_dim());
-        line(buf, &mut y, &names_in(&app.facts, q, 3), s_dim());
-        if !app.can_zoom_in() {
-            line(buf, &mut y, "(1 addr/cell — max zoom)", s_dim());
-        }
+        line(buf, &mut y, &format!("{} used{}", used, if app.can_zoom_in() { "" } else { " · max zoom" }), s_dim());
         y += 1;
     }
 
-    line(buf, &mut y, "PALETTE", s_title());
-    line(buf, &mut y, &format!("{} [s]", app.scheme.name()), s_dim());
-    let (kn, ..) = KNOBS[app.active_knob];
-    line(buf, &mut y, &format!("{kn} = {:.2}  [ ] ,.", app.knobs.get(app.active_knob)), s_dim());
-    y += 1;
-
-    let crumb = app.scope_chain().iter().map(mullion_label).collect::<Vec<_>>().join(" › ");
-    line(buf, &mut y, "PATH", s_title());
-    line(buf, &mut y, &crumb, s_dim());
+    // The scrollable, paginated host list — only the visible window is drawn, so it is instant
+    // even over a huge range (it lists the bounded known hosts, never the address space).
+    let hosts = app.hosts_in_view();
+    let rows = (bottom.saturating_sub(y + 1)) as usize; // leave the header row
+    let scroll = app.host_scroll.min(hosts.len().saturating_sub(1));
+    let more = hosts.len().saturating_sub(scroll + rows);
+    let label = if more > 0 { format!("HOSTS {}-{}/{} ↕", scroll + 1, scroll + rows.min(hosts.len() - scroll), hosts.len()) } else { format!("HOSTS ({})", hosts.len()) };
+    line(buf, &mut y, &label, s_title());
+    for (addr, name) in hosts.iter().skip(scroll).take(rows) {
+        line(buf, &mut y, &format!("{addr}  {name}"), s_dim());
+    }
 }
 
 /// A range's short label — a free function so it can be used in an iterator map.
@@ -223,27 +218,6 @@ fn draw_subnet_outline(buf: &mut Buffer, body: Rect, grid: &MapGrid, app: &App) 
 }
 
 
-/// A short, comma-separated list of the hostnames inside `sub` — what lives in the
-/// block under the cursor. Shows up to `max` names, then `+N` for the rest; `—` when
-/// the block is empty. Names come from the reconciled facts (PTR or NetBox name).
-fn names_in(facts: &HashMap<IpAddr, AddressFacts>, sub: AddrRange, max: usize) -> String {
-    let mut names: Vec<String> = facts
-        .values()
-        .filter(|f| sub.contains(f.addr))
-        .filter_map(|f| reconcile::row_from_facts(f).name)
-        .collect();
-    if names.is_empty() {
-        return "—".to_string();
-    }
-    names.sort();
-    let extra = names.len().saturating_sub(max);
-    let mut shown = names.into_iter().take(max).collect::<Vec<_>>().join(", ");
-    if extra > 0 {
-        shown.push_str(&format!(", +{extra}"));
-    }
-    shown
-}
-
 /// Clip `text` to at most `w` columns (so an info line never overruns the screen).
 fn clip(text: &str, w: u16) -> String {
     text.chars().take(w as usize).collect()
@@ -262,14 +236,12 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     let area = super::draw::frame(buf, full, &title, s_title(), Some(super::draw::data_badge(app)), prog, &app.heartbeat());
     let foot_y = area.y + area.height - 1;
 
-    // Layout: the Gilbert square (with a rounded edge) on the left, an information pane on the
-    // right. The pane is dropped on a narrow terminal so the square keeps its room.
-    let pane_w = if area.width >= 66 { (area.width / 3).clamp(26, 42) } else { 0 };
-    let map_region = Rect::new(area.x, area.y, area.width - pane_w, area.height.saturating_sub(1));
-
-    // The grid sits one cell inside the region, leaving a ring for its rounded edge.
-    let inner = Rect::new(map_region.x + 1, map_region.y + 1, map_region.width.saturating_sub(2), map_region.height.saturating_sub(2));
-    let (gw, gh) = curve_map::fit_dims(inner, app.range.block_len());
+    // Layout: the Gilbert square (with a rounded edge) hugs the left; the info pane follows its
+    // right edge with a couple of columns' gap. The square is bound by the available *height* (so
+    // it stays square-ish and does not eat the width), leaving the rest for the pane.
+    let inner = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(3));
+    let sq_region = Rect::new(inner.x, inner.y, inner.width.min(inner.height * 2 + 2), inner.height);
+    let (gw, gh) = curve_map::fit_dims(sq_region, app.range.block_len());
     let grid = MapGrid::build(app.range, &app.facts, gw, gh);
     let body = Rect::new(inner.x, inner.y, (gw as u16) * 2, gh as u16);
     let used_total: u32 = grid.used.iter().sum();
@@ -297,14 +269,15 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     curve_map::render(buf, body, grid.gilbert(), |d| {
         let pos = if total > 1 { d as f32 / (total - 1) as f32 } else { 0.0 };
         let (bg, fg) = app.scheme.paint(grid.fraction(d), pos, &app.knobs);
-        let (mut fg, mut bg) = match group_cells.get(d) {
+        let (mut fg, bg) = match group_cells.get(d) {
             Some(Some((look, occ))) if !look.animate => (fg, super::palette::hsl_rgb(look.hue, look.sat, 0.16 + 0.30 * occ)),
             _ => (fg, bg), // curve_map wants (fg, bg); Scheme::paint yields (bg, fg)
         };
+        // The selected quadrant flashes the **curve** toward yellow — the background is left alone.
         if let Some(p) = &pulse {
             let a = p(d) * 0.9;
             if a > 0.0 {
-                (fg, bg) = (toward_yellow(fg, a), toward_yellow(bg, a));
+                fg = toward_yellow(fg, a);
             }
         }
         (fg, bg)
@@ -334,15 +307,22 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     let estyle = BorderStyle { weight: LineWeight::Light, corners: CornerStyle::Rounded, style: s_dim() };
     mullion::border::draw_box(buf, edge, mullion::border::Borders::ALL, &estyle);
 
-    // The information pane beside the square.
-    if pane_w > 0 {
-        let pane = Rect::new(area.x + area.width - pane_w, area.y, pane_w, area.height.saturating_sub(1));
+    // The palette menu lives in a gap in the square's bottom edge — `┤ scheme · knob=val ├`.
+    let (kn, ..) = KNOBS[app.active_knob];
+    let palette = format!("┤ {} · {}={:.2} ├", app.scheme.name(), kn, app.knobs.get(app.active_knob));
+    btxt(buf, edge.x + 2, edge.y + edge.height - 1, &clip(&palette, edge.width.saturating_sub(4)), s_dim());
+
+    // The information pane, hugging the square's right edge with a two-column gap (no divider).
+    let pane_x = edge.x + edge.width + 2;
+    let pane = Rect::new(pane_x, area.y, (area.x + area.width).saturating_sub(pane_x), area.height.saturating_sub(1));
+    app.pane_area = pane;
+    if pane.width >= 20 {
         draw_info_pane(buf, pane, app, &grid, &quads, used_total);
     }
 
     let hints: &[(&str, &str)] =
         &[("← ↑ ↓ →", "quadrant"), ("↵/click", "zoom in"), ("Esc/rclick", "out"), ("g", "groups"), ("b", "subnets"), ("q", "quit")];
-    keyhints(buf, area.x, foot_y, map_region.width, hints);
+    keyhints(buf, area.x, foot_y, area.width, hints);
 }
 
 #[cfg(test)]

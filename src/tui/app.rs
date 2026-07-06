@@ -146,6 +146,11 @@ pub struct App {
     /// The map grid's on-screen rectangle at the last render — lets a mouse `(column, row)` be
     /// mapped back to a grid cell (each cell is two columns wide).
     pub map_area: Rect,
+    /// The info pane's on-screen rectangle at the last render — the wheel scrolls the host list
+    /// when the pointer is over it (rather than zooming).
+    pub pane_area: Rect,
+    /// Scroll offset (first visible row) of the pane's host list.
+    pub host_scroll: usize,
     /// Parent scopes to return to on zoom-out (each a range + its facts).
     zoom_stack: Vec<ZoomFrame>,
     /// How the map colours cells by occupancy.
@@ -256,6 +261,8 @@ impl App {
             zoom_sel: 0,
             show_subnets: false,
             map_area: Rect::new(0, 0, 0, 0),
+            pane_area: Rect::new(0, 0, 0, 0),
+            host_scroll: 0,
             asserted_groups: Vec::new(),
             native_groups: Vec::new(),
             anim_override: None,
@@ -674,6 +681,9 @@ impl App {
             KeyCode::Enter | KeyCode::Char('+') => self.zoom_into_selected(),
             // Esc only ever zooms out — never quits (only q/Q do).
             KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('-') => self.zoom_out(),
+            // Page the pane's host list.
+            KeyCode::PageDown => self.scroll_hosts(8),
+            KeyCode::PageUp => self.scroll_hosts(-8),
             KeyCode::Char('s') | KeyCode::Char('p') => self.scheme = self.scheme.cycle(),
             KeyCode::Char('g') => self.color_by_group = !self.color_by_group,
             KeyCode::Char('b') => self.show_subnets = !self.show_subnets,
@@ -807,10 +817,47 @@ impl App {
         })
     }
 
+    /// The hosts visible in the current view — the *known* addresses (from the bounded facts, not
+    /// the whole range), sorted, each with its best name. Cheap: it never enumerates the address
+    /// space, only what a source reported, so even a `/8` lists instantly.
+    #[must_use]
+    pub fn hosts_in_view(&self) -> Vec<(IpAddr, String)> {
+        let mut hosts: Vec<(IpAddr, String)> = self
+            .facts
+            .values()
+            .map(|f| (f.addr, reconcile::row_from_facts(f).name.unwrap_or_default()))
+            .collect();
+        hosts.sort_by_key(|(a, _)| *a);
+        hosts
+    }
+
+    /// Scroll the pane's host list by `delta` rows, clamped so it never scrolls past the end.
+    fn scroll_hosts(&mut self, delta: isize) {
+        let n = self.facts.len();
+        let max = n.saturating_sub(1);
+        self.host_scroll = (self.host_scroll as isize + delta).clamp(0, max as isize) as usize;
+    }
+
+    /// Whether a screen `(column, row)` is over the info pane.
+    fn over_pane(&self, column: u16, row: u16) -> bool {
+        let p = self.pane_area;
+        p.width > 0 && (p.x..p.x + p.width).contains(&column) && (p.y..p.y + p.height).contains(&row)
+    }
+
     /// Mouse control for the map (zoom mode): moving the pointer selects the quadrant under it,
-    /// left-click (or wheel-up) zooms into it, right-click (or wheel-down) zooms out.
+    /// left-click (or wheel-up) zooms into it, right-click (or wheel-down) zooms out. Over the info
+    /// pane, the wheel scrolls the host list instead of zooming.
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         if self.view != View::Map {
+            return;
+        }
+        // The wheel scrolls the host list when the pointer is over the pane.
+        if self.over_pane(ev.column, ev.row) {
+            match ev.kind {
+                MouseEventKind::ScrollDown => self.scroll_hosts(3),
+                MouseEventKind::ScrollUp => self.scroll_hosts(-3),
+                _ => {}
+            }
             return;
         }
         match ev.kind {
@@ -874,6 +921,7 @@ impl App {
         self.pan = (0, 0);
         self.map_cur = (0, 0);
         self.zoom_sel = 0; // a new scope has fresh quadrants; select the first
+        self.host_scroll = 0; // and a fresh host list
         self.detail = false;
     }
 
@@ -1512,6 +1560,35 @@ mod tests {
         let before = app.knobs.get(1);
         app.on_key(KeyCode::Char(',')); // decrease
         assert!(app.knobs.get(1) < before);
+    }
+
+    #[test]
+    fn host_list_is_sorted_and_scrolls_within_bounds() {
+        let hosts = ["10.87.3.200", "10.87.3.5", "10.87.3.90"];
+        let facts: Vec<AddressFacts> = hosts
+            .iter()
+            .map(|a| AddressFacts { addr: a.parse().unwrap(), netbox: None, ptr: Some("h.".into()), live: true })
+            .collect();
+        let mut app = App::new(Cidr::parse("10.87.3.0/24").unwrap(), facts, false, false, false, Config::default());
+        app.view = View::Map;
+        // Sorted by address, all known hosts (bounded — never the whole /24).
+        let list = app.hosts_in_view();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].0.to_string(), "10.87.3.5");
+        assert_eq!(list[2].0.to_string(), "10.87.3.200");
+
+        // Wheel over the pane scrolls the list; it never runs past the last host or below zero.
+        app.pane_area = Rect::new(60, 0, 30, 40);
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let wheel = |k| MouseEvent { kind: k, column: 70, row: 10, modifiers: KeyModifiers::empty() };
+        for _ in 0..20 {
+            app.on_mouse(wheel(MouseEventKind::ScrollDown));
+        }
+        assert_eq!(app.host_scroll, 2); // clamped to len-1
+        for _ in 0..20 {
+            app.on_mouse(wheel(MouseEventKind::ScrollUp));
+        }
+        assert_eq!(app.host_scroll, 0); // clamped to 0
     }
 
     #[test]
