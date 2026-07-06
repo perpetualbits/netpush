@@ -567,13 +567,17 @@ impl Grouping {
     #[must_use]
     pub fn look(&self, id: &GroupId) -> Look {
         let hue = group_hue(id);
+        // The `band` is the group's index among the (sorted) groups — mullion's [`FlowStyle`]
+        // spaces bands by the golden angle, so sequential bands give maximally distinct hues for
+        // the animated flow gradient. Falls back to a slug hash if the id is not in this grouping.
+        let band = self.groups.iter().position(|g| &g.id == id).unwrap_or_else(|| group_hue(id) as usize);
         let (sat, animate) = match self.groups.iter().find(|g| &g.id == id).map(|g| g.kind) {
             Some(GroupKind::Cluster) => (0.85, true),
             Some(GroupKind::Service) => (0.70, true),
             Some(GroupKind::Pair) => (0.55, false),
             Some(GroupKind::Singleton) | None => (0.20, false),
         };
-        Look { hue, sat, animate }
+        Look { band, hue, sat, animate }
     }
 
     /// Every group that still needs writing to NetBox (not already native) — the push work-list.
@@ -583,15 +587,17 @@ impl Grouping {
     }
 }
 
-/// A group's map treatment: hue in degrees `[0,360)`, saturation `[0,1]`, and whether its cells
-/// animate (the coloured-square shimmer that makes a cluster's extent pop).
+/// A group's map treatment. The animated flow uses [`band`](Look::band) (a mullion
+/// [`FlowStyle`](mullion::FlowStyle) hue family); the quiet static tint uses [`hue`](Look::hue).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
-    /// Hue in degrees.
+    /// Golden-angle hue **band** for the animated flow gradient — maximally distinct per group.
+    pub band: usize,
+    /// Static hue in degrees `[0,360)` (used for non-animated groups' background tint).
     pub hue: f32,
     /// Saturation `[0,1]`.
     pub sat: f32,
-    /// Whether the group's cells animate.
+    /// Whether the group's cells animate (a cluster/service flows; a pair/singleton stays quiet).
     pub animate: bool,
 }
 

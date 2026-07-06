@@ -113,25 +113,21 @@ fn group_look_at(app: &App, grid: &MapGrid, d: usize) -> Option<(crate::group::L
     Some((app.grouping.look(&g.id), grid.fraction(d).clamp(0.0, 1.0)))
 }
 
-/// The block-glyph ramp for the animated cluster **bitstream** — the "stream of little coloured
-/// squares" of the vision doc. A brightness wave travels along the curve over time, and each
-/// cell picks a denser block as the wave crests, so a cluster's run of cells shimmers like data
-/// flowing down the Hilbert path.
-const BITSTREAM: [char; 5] = ['░', '▒', '▓', '█', '▓'];
-
-/// Paint one animated cluster cell as a coloured square: both of the cell's columns filled with a
-/// block from [`BITSTREAM`], in the group's hue, at a lightness that pulses with the travelling
-/// wave `phase`. `occ` sets the baseline brightness (fuller = brighter). The `selected` cursor
-/// still overrides the style so it stays findable.
-fn paint_bitstream(buf: &mut Buffer, x: u16, y: u16, look: crate::group::Look, occ: f32, phase: f32, selected: bool) {
-    let wave = 0.5 + 0.5 * phase.sin(); // 0..1
-    let glyph = BITSTREAM[((wave * (BITSTREAM.len() - 1) as f32).round() as usize).min(BITSTREAM.len() - 1)];
-    let base = 0.16 + 0.30 * occ;
-    let fg = super::palette::hsl_rgb(look.hue, look.sat, base * (0.5 + 0.5 * wave));
-    let bg = super::palette::hsl_rgb(look.hue, look.sat, base * 0.35);
-    let style = if selected { s_sel() } else { Style::default().fg(fg).bg(bg) };
-    buf.set_char(x, y, glyph, style);
-    buf.set_char(x + 1, y, glyph, style);
+/// Paint one animated cluster cell as a **coloured-square bitstream** using mullion's surf-field
+/// [`FlowStyle`](mullion::FlowStyle) `stream_color` (the technique the `spiral_stress` demo
+/// pioneered): the group's `band` gives a golden-angle-distinct base hue, the hue streams along
+/// the curve position `pos` and scrolls with the clock `t`, and `active` (the cell is occupied —
+/// a *set bit* in the stream) makes it glow while empty cells recede. Both of the cell's columns
+/// are filled with a solid block so the cluster reads as a run of flowing little squares. The
+/// cursor style still wins so the selection stays findable.
+fn paint_bitstream(buf: &mut Buffer, x: u16, y: u16, band: usize, pos: f32, t: f32, active: bool, selected: bool) {
+    let style = if selected {
+        s_sel()
+    } else {
+        mullion::FlowStyle { band, ..Default::default() }.color(pos, t, active)
+    };
+    buf.set_char(x, y, '█', style);
+    buf.set_char(x + 1, y, '█', style);
 }
 
 /// Choose the Gilbert grid `(width, height)` for `body`, in cells (each cell is two columns
@@ -326,10 +322,10 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
             if app.color_by_group {
                 if let Some((look, occ)) = group_look_at(app, &grid, d) {
                     if look.animate {
-                        // Phase travels along the curve (index d) and scrolls with the clock, so
-                        // the squares appear to flow down the Hilbert path.
-                        let phase = d as f32 * 0.6 - clock * 3.0;
-                        paint_bitstream(buf, x, y, look, occ, phase, selected);
+                        // The hue streams along the curve (position d/total) and scrolls with the
+                        // clock; an occupied cell is a lit bit in the stream.
+                        let pos = if total > 1 { d as f32 / (total - 1) as f32 } else { 0.0 };
+                        paint_bitstream(buf, x, y, look.band, pos, clock, occ > 0.0, selected);
                         continue;
                     }
                     bg = super::palette::hsl_rgb(look.hue, look.sat, 0.16 + 0.30 * occ);
