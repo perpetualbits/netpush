@@ -208,6 +208,14 @@ pub fn site_path(site: &str) -> PathBuf {
     config_dir().join("canopy").join("conf.d").join(format!("{site}.toml"))
 }
 
+/// `<config-dir>/canopy/conf.d/<site>.groups.toml` — the human-asserted group **staging** file
+/// for a site: "these hosts/IPs are this cluster", held only until they can be pushed into
+/// NetBox. Kept beside the site estate so it is versioned and shared the same way.
+#[must_use]
+pub fn groups_path(site: &str) -> PathBuf {
+    config_dir().join("canopy").join("conf.d").join(format!("{site}.groups.toml"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

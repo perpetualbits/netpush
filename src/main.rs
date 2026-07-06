@@ -13,6 +13,7 @@ mod dns;
 mod dns_discovery;
 mod fixture;
 mod graph;
+mod group;
 mod live;
 mod map;
 mod plan;
@@ -99,6 +100,11 @@ struct Args {
     #[arg(long)]
     list: bool,
 
+    /// Print the reconciled logical groups (clusters, name-families, services) and the NetBox
+    /// tag each would be pushed as, then exit. The staging view for "put these in NetBox".
+    #[arg(long)]
+    list_groups: bool,
+
     /// Plan allocating an address (see --addr) as this FQDN; prints the change plan.
     #[arg(long, value_name = "FQDN")]
     allocate: Option<String>,
@@ -178,6 +184,11 @@ fn main() -> anyhow::Result<()> {
 
     if args.list {
         list_table(range, &facts);
+        return Ok(());
+    }
+
+    if args.list_groups {
+        list_groups(&facts, &args.site);
         return Ok(());
     }
 
@@ -395,6 +406,60 @@ fn demo_v6_facts(range: &Cidr) -> Vec<AddressFacts> {
 /// Print the reconciled range as plain text: a status tally, then every address
 /// that is *not* simply free (the interesting rows). Lets you eyeball the result
 /// without a terminal — the counterpart of census's `--ping`.
+/// Print the reconciled logical groups and, for each, the NetBox tag canopy would push it as —
+/// the staging view for "put these groupings into NetBox". Loads the site's group staging file
+/// (`conf.d/<site>.groups.toml`) if present for the human-asserted layer, infers the rest from
+/// the naming scheme, fuses them ([`group::merge`]), and lists members with their origin.
+///
+/// Read-only: it only *shows* the tags; nothing is written. The point is to make the pending
+/// NetBox work legible before any write path exists.
+fn list_groups(facts: &[reconcile::AddressFacts], site: &str) {
+    let map: std::collections::HashMap<std::net::IpAddr, reconcile::AddressFacts> =
+        facts.iter().cloned().map(|f| (f.addr, f)).collect();
+
+    // The human-asserted staging layer, if the site has one. A missing or unparseable file just
+    // means "no assertions yet" — inference still runs.
+    let asserted = match std::fs::read_to_string(config::groups_path(site)) {
+        Ok(text) => match toml::from_str::<group::GroupsFile>(&text) {
+            Ok(gf) => gf.into_groups(),
+            Err(e) => {
+                eprintln!("warning: ignoring {}: {e}", config::groups_path(site).display());
+                Vec::new()
+            }
+        },
+        Err(_) => Vec::new(),
+    };
+
+    let grouping = group::merge(asserted, Vec::new(), group::infer(&map));
+    if grouping.groups.is_empty() {
+        println!("(no groups — no named hosts to infer from and no {} )", config::groups_path(site).display());
+        return;
+    }
+
+    for g in &grouping.groups {
+        let target = match g.netbox_target() {
+            group::NetboxTarget::Tag(t) => t,
+            group::NetboxTarget::Cluster(id) => format!("cluster #{id}"),
+        };
+        let origin = match &g.origin {
+            group::Origin::Asserted => "asserted".to_string(),
+            group::Origin::Netbox { .. } => "netbox".to_string(),
+            group::Origin::Inferred { confidence, .. } => format!("inferred {:.0}%", confidence * 100.0),
+        };
+        let push = if g.needs_push() { "  → push" } else { "" };
+        println!("\n{:?}  [{}]  {}  ({}){}", g.label, target, origin, g.members.len(), push);
+        let mut members = g.members.clone();
+        members.sort_by_key(|m| m.addr);
+        for m in &members {
+            let addr = m.addr.map(|a| a.to_string()).unwrap_or_else(|| "—".into());
+            println!("    {:<16} {}", addr, m.host.as_deref().unwrap_or(""));
+        }
+    }
+
+    let pending = grouping.pending_pushes();
+    println!("\n{} group(s); {} not yet in NetBox.", grouping.groups.len(), pending.len());
+}
+
 fn list_table(range: Cidr, facts: &[reconcile::AddressFacts]) {
     // Lazy: never materialize the whole range. Counts and the non-free rows come from
     // the bounded facts; the first free address is found by scanning host indices

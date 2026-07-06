@@ -151,6 +151,13 @@ pub struct App {
     pub scheme: Scheme,
     pub knobs: Knobs,
     pub active_knob: usize,
+    /// Logical groupings (clusters, name-families, services) reconciled from the current
+    /// facts — the map paints each group's stable hue when [`color_by_group`](App::color_by_group)
+    /// is on. Rebuilt whenever the facts change (a live gather, a map zoom).
+    pub grouping: crate::group::Grouping,
+    /// `true` when the map colours cells by **group identity** (hue = which cluster) instead of
+    /// occupancy; toggled with `g`. Occupancy still sets the brightness of a grouped cell.
+    pub color_by_group: bool,
     /// NetBox-defined subnets (variable-length) covering the range — used to label the
     /// real subnet the map cursor sits in. Empty until live data (or demo) supplies them.
     pub subnets: Vec<Subnet>,
@@ -202,6 +209,9 @@ impl App {
             Rc::new(facts.into_iter().map(|f| (f.addr, f)).collect());
         let counts = reconcile::counts_from_facts(range.host_count(), &facts);
         let (graph, graph_canvas) = build_graph(&facts);
+        // Infer logical groups from the naming scheme up front (asserted/native sources fold
+        // in later); the map can then colour by identity from the first frame.
+        let grouping = crate::group::merge(Vec::new(), Vec::new(), crate::group::infer(&facts));
         App {
             range,
             total,
@@ -223,6 +233,8 @@ impl App {
             scheme: Scheme::default(),
             knobs: Knobs::default(),
             active_knob: 0,
+            grouping,
+            color_by_group: false,
             subnets: Vec::new(),
             // Live CLI start means the endpoints already answered; otherwise we are on
             // demo data, not yet connected.
@@ -639,6 +651,7 @@ impl App {
             KeyCode::Enter | KeyCode::Char('+') => self.zoom_into_cursor(),
             KeyCode::Backspace | KeyCode::Char('-') => self.zoom_out(),
             KeyCode::Char('s') | KeyCode::Char('p') => self.scheme = self.scheme.cycle(),
+            KeyCode::Char('g') => self.color_by_group = !self.color_by_group,
             KeyCode::Char('[') => {
                 self.active_knob = (self.active_knob + super::palette::KNOBS.len() - 1) % super::palette::KNOBS.len();
             }
@@ -705,6 +718,7 @@ impl App {
         let (graph, canvas) = build_graph(&facts);
         self.graph = graph;
         self.graph_canvas = canvas;
+        self.grouping = crate::group::merge(Vec::new(), Vec::new(), crate::group::infer(&facts));
         self.facts = facts;
         self.cur = ListCursor::new();
         self.tree_cur = 0;

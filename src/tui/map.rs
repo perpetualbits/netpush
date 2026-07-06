@@ -97,6 +97,26 @@ fn paint_cell(buf: &mut Buffer, x: u16, y: u16, bg: Color, fg: Color, selected: 
     buf.set_char(x + 1, y, if connects_right { '─' } else { ' ' }, cell);
 }
 
+/// The background colour for cell `d` when the map is colouring by **group identity**: the hue
+/// of the logical group that owns an address in the cell (shared across the whole cluster), at a
+/// lightness set by how full the cell is — so a group reads as one coloured region that
+/// brightens where it is packed. `None` when the cell holds no grouped address (the caller then
+/// keeps the occupancy colour, which leaves empty space at the terminal default).
+///
+/// A coarse cell can span several groups; it takes the first grouped member in address order —
+/// enough to show a cluster's extent, and exact once zoomed to leaf cells.
+fn group_bg(app: &App, grid: &MapGrid, d: usize) -> Option<mullion::style::Color> {
+    let cr = grid.cell_range(d);
+    let mut grouped: Vec<_> = app.facts.values().filter(|f| cr.contains(f.addr)).collect();
+    grouped.sort_by_key(|f| f.addr);
+    let g = grouped.iter().find_map(|f| app.grouping.group_of(f.addr))?;
+    let look = app.grouping.look(&g.id);
+    // Occupancy → lightness: any presence is clearly visible (0.20), a full cell brighter (0.48),
+    // staying dim enough that the bright curve line still reads on top.
+    let light = 0.20 + 0.28 * grid.fraction(d).clamp(0.0, 1.0);
+    Some(super::palette::hsl_rgb(look.hue, look.sat, light))
+}
+
 /// Choose the Gilbert grid `(width, height)` for `body`, in cells (each cell is two columns
 /// wide, one row tall). The grid **fills** the drawable rectangle, but never asks for more
 /// cells than the range has addresses (`block_len`): a large range uses the whole screen at
@@ -279,7 +299,14 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
             let prev = (d > 0).then(|| grid.cell_xy(d - 1)).and_then(|p| dir_between(cur, p));
             let next = (d + 1 < total).then(|| grid.cell_xy(d + 1)).and_then(|n| dir_between(cur, n));
             let pos = if total > 1 { d as f32 / (total - 1) as f32 } else { 0.0 };
-            let (bg, fg) = app.scheme.paint(grid.fraction(d), pos, &app.knobs);
+            let (mut bg, fg) = app.scheme.paint(grid.fraction(d), pos, &app.knobs);
+            // In group mode, a cell owned by a logical group takes that group's stable hue
+            // (occupancy still sets its brightness), so a cluster reads as one coloured region.
+            if app.color_by_group {
+                if let Some(gbg) = group_bg(app, &grid, d) {
+                    bg = gbg;
+                }
+            }
             paint_cell(buf, x, y, bg, fg, selected, curve_glyph(prev, next));
         }
     }
@@ -297,51 +324,40 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
 mod tests {
     use super::*;
 
-    /// Render the fixture map to a buffer and print it as ANSI truecolor — a way to *see*
-    /// the Hilbert map on a terminal without a tty. Ignored by default (it writes escape
-    /// codes to stdout); run with `cargo test --lib map::tests::dump_map -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn dump_map() {
-        use crate::fixture;
+    /// Map a mullion [`Color`] to an SGR parameter string for `fg` (base 30/38) or `bg`
+    /// (base 40/48). Rgb becomes a truecolor triple; named colours use the ANSI 16.
+    fn sgr(c: mullion::style::Color, bg: bool) -> String {
         use mullion::style::Color;
-        use mullion::{Buffer, Rect};
-
-        // Map a mullion [`Color`] to an SGR parameter string for `fg` (base 30/38) or `bg`
-        // (base 40/48). Rgb becomes a truecolor triple; named colours use the ANSI 16.
-        fn sgr(c: Color, bg: bool) -> String {
-            let (fg_base, tc, bright_base) = if bg { (40, 48, 100) } else { (30, 38, 90) };
-            match c {
-                Color::Rgb(r, g, b) => format!("{tc};2;{r};{g};{b}"),
-                Color::Reset => format!("{}", fg_base + 9),
-                Color::Black => format!("{}", fg_base),
-                Color::Red => format!("{}", fg_base + 1),
-                Color::Green => format!("{}", fg_base + 2),
-                Color::Yellow => format!("{}", fg_base + 3),
-                Color::Blue => format!("{}", fg_base + 4),
-                Color::Magenta => format!("{}", fg_base + 5),
-                Color::Cyan => format!("{}", fg_base + 6),
-                Color::Gray => format!("{}", fg_base + 7),
-                Color::DarkGray => format!("{}", bright_base),
-                Color::LightRed => format!("{}", bright_base + 1),
-                Color::LightGreen => format!("{}", bright_base + 2),
-                Color::LightYellow => format!("{}", bright_base + 3),
-                Color::LightBlue => format!("{}", bright_base + 4),
-                Color::LightMagenta => format!("{}", bright_base + 5),
-                Color::LightCyan => format!("{}", bright_base + 6),
-                Color::White => format!("{}", bright_base + 7),
-                Color::Indexed(i) => format!("{tc};5;{i}"),
-            }
+        let (fg_base, tc, bright_base) = if bg { (40, 48, 100) } else { (30, 38, 90) };
+        match c {
+            Color::Rgb(r, g, b) => format!("{tc};2;{r};{g};{b}"),
+            Color::Reset => format!("{}", fg_base + 9),
+            Color::Black => format!("{}", fg_base),
+            Color::Red => format!("{}", fg_base + 1),
+            Color::Green => format!("{}", fg_base + 2),
+            Color::Yellow => format!("{}", fg_base + 3),
+            Color::Blue => format!("{}", fg_base + 4),
+            Color::Magenta => format!("{}", fg_base + 5),
+            Color::Cyan => format!("{}", fg_base + 6),
+            Color::Gray => format!("{}", fg_base + 7),
+            Color::DarkGray => format!("{}", bright_base),
+            Color::LightRed => format!("{}", bright_base + 1),
+            Color::LightGreen => format!("{}", bright_base + 2),
+            Color::LightYellow => format!("{}", bright_base + 3),
+            Color::LightBlue => format!("{}", bright_base + 4),
+            Color::LightMagenta => format!("{}", bright_base + 5),
+            Color::LightCyan => format!("{}", bright_base + 6),
+            Color::White => format!("{}", bright_base + 7),
+            Color::Indexed(i) => format!("{tc};5;{i}"),
         }
+    }
 
-        let (range, facts) = fixture::demo();
-        let mut app = App::new(range, facts, false, false, false, crate::config::Config::default());
-        app.view = super::super::app::View::Map;
-
-        let (w, h) = (96u16, 48u16);
+    /// Render `app`'s current view to a `w×h` buffer and return it as an ANSI-truecolor string —
+    /// a way to *see* the map on a terminal without a tty.
+    fn dump_ansi(app: &mut App, w: u16, h: u16) -> String {
+        use mullion::{Buffer, Rect};
         let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
-        screen(&mut buf, &mut app);
-
+        screen(&mut buf, app);
         let mut out = String::new();
         for y in 0..h {
             for x in 0..w {
@@ -351,7 +367,30 @@ mod tests {
             }
             out.push_str("\x1b[0m\n");
         }
-        println!("{out}");
+        out
+    }
+
+    /// Dump the occupancy-coloured map. Ignored by default (writes escape codes to stdout); run
+    /// with `cargo test --bin canopy map::tests::dump_map -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_map() {
+        let (range, facts) = crate::fixture::demo();
+        let mut app = App::new(range, facts, false, false, false, crate::config::Config::default());
+        app.view = super::super::app::View::Map;
+        println!("{}", dump_ansi(&mut app, 96, 48));
+    }
+
+    /// Dump the **group-identity**-coloured map (`g` mode): each logical group's stable hue.
+    /// Run with `cargo test --bin canopy map::tests::dump_groups -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_groups() {
+        let (range, facts) = crate::fixture::demo();
+        let mut app = App::new(range, facts, false, false, false, crate::config::Config::default());
+        app.view = super::super::app::View::Map;
+        app.color_by_group = true;
+        println!("{}", dump_ansi(&mut app, 96, 48));
     }
 
     #[test]
