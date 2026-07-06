@@ -10,9 +10,9 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, KeyEvent};
+use crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use mullion::style::{Color, Style};
-use mullion::{backend::CrosstermBackend, EventReader, GraphCanvas, KeyCode, RangeSource, Terminal};
+use mullion::{backend::CrosstermBackend, EventReader, GraphCanvas, KeyCode, RangeSource, Rect, Terminal};
 
 use super::draw;
 use super::focus::ListCursor;
@@ -143,6 +143,9 @@ pub struct App {
     /// The map grid `(width, height)` measured at the last map render — used to clamp the
     /// cursor and to compute which slice a cell covers (the render owns the fit).
     pub map_dims: (u32, u32),
+    /// The map grid's on-screen rectangle at the last render — lets a mouse `(column, row)` be
+    /// mapped back to a grid cell (each cell is two columns wide).
+    pub map_area: Rect,
     /// Parent scopes to return to on zoom-out (each a range + its facts).
     zoom_stack: Vec<ZoomFrame>,
     /// How the map colours cells by occupancy.
@@ -252,6 +255,7 @@ impl App {
             color_by_group: false,
             chooser: None,
             show_subnets: false,
+            map_area: Rect::new(0, 0, 0, 0),
             asserted_groups: Vec::new(),
             native_groups: Vec::new(),
             anim_override: None,
@@ -784,6 +788,42 @@ impl App {
         Some(self.range.nth_slice(cells, u128::from(d)))
     }
 
+    /// The grid cell `(x, y)` under a mouse `(column, row)`, or `None` if outside the grid. Each
+    /// cell is two screen columns wide, so the column is halved relative to the grid's origin.
+    fn map_cell_at(&self, column: u16, row: u16) -> Option<(u32, u32)> {
+        let a = self.map_area;
+        if a.width == 0 || column < a.x || row < a.y || column >= a.x + a.width || row >= a.y + a.height {
+            return None;
+        }
+        let (gx, gy) = (u32::from((column - a.x) / 2), u32::from(row - a.y));
+        let (w, h) = self.map_dims;
+        (gx < w && gy < h).then_some((gx, gy))
+    }
+
+    /// Mouse control for the map: left-click selects the cell under the pointer, the wheel zooms
+    /// (up = into that cell, down = out). Ignored in the other views for now.
+    pub fn on_mouse(&mut self, ev: MouseEvent) {
+        if self.view != View::Map {
+            return;
+        }
+        match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(cell) = self.map_cell_at(ev.column, ev.row) {
+                    self.map_cur = cell;
+                    self.chooser = None;
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if let Some(cell) = self.map_cell_at(ev.column, ev.row) {
+                    self.map_cur = cell;
+                    self.zoom_into_cursor();
+                }
+            }
+            MouseEventKind::ScrollDown => self.zoom_out(),
+            _ => {}
+        }
+    }
+
     /// The cursor's index along the Gilbert curve in the current grid (`0` if the grid is empty).
     fn cursor_d(&self) -> usize {
         let (w, h) = self.map_dims;
@@ -1038,7 +1078,10 @@ pub fn run(
     }
     let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     term.enter()?;
+    // Capture mouse events so the map can be clicked/scrolled; always released on the way out.
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture);
     let result = main_loop(&mut term, &mut app);
+    let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture);
     term.leave()?;
     result
 }
@@ -1055,8 +1098,10 @@ fn main_loop(term: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -
             View::Tree => super::tree::screen(buf, app),
             View::Map => super::map::screen(buf, app),
         })?;
-        if let Some(Event::Key(KeyEvent { code, .. })) = reader.recv_timeout(RENDER_TICK) {
-            app.on_key(code);
+        match reader.recv_timeout(RENDER_TICK) {
+            Some(Event::Key(KeyEvent { code, .. })) => app.on_key(code),
+            Some(Event::Mouse(ev)) => app.on_mouse(ev),
+            _ => {}
         }
         // Service a live request here, where we own the terminal: the token fetch may
         // launch `pinentry`, which needs a normal tty *and* the keyboard to itself — so
@@ -1460,6 +1505,35 @@ mod tests {
         app.on_key(KeyCode::Esc);
         assert_eq!(app.chooser, None);
         assert_eq!(app.range, expected); // Esc in chooser did NOT zoom out
+    }
+
+    #[test]
+    fn mouse_click_selects_the_cell_and_scroll_zooms() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let range = Cidr::parse("10.0.0.0/8").unwrap();
+        let mut app = App::new(range, Vec::new(), false, false, false, Config::default());
+        app.view = View::Map;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 50));
+        crate::tui::map::screen(&mut buf, &mut app); // sets map_dims + map_area
+        let a = app.map_area;
+        assert!(a.width > 0);
+
+        // Left-click at a known screen position maps to grid cell ((col-x)/2, row-y).
+        let (col, row) = (a.x + 8, a.y + 2);
+        let click = MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: col, row, modifiers: KeyModifiers::empty() };
+        app.on_mouse(click);
+        assert_eq!(app.map_cur, (4, 2));
+
+        // Scroll up over a cell zooms into it; scroll down zooms back out.
+        let parent = app.range;
+        let scroll_up =
+            MouseEvent { kind: MouseEventKind::ScrollUp, column: a.x + 20, row: a.y + 4, modifiers: KeyModifiers::empty() };
+        app.on_mouse(scroll_up);
+        assert_ne!(app.range, parent, "scroll-up zoomed into a sub-range");
+        let scroll_down =
+            MouseEvent { kind: MouseEventKind::ScrollDown, column: a.x, row: a.y, modifiers: KeyModifiers::empty() };
+        app.on_mouse(scroll_down);
+        assert_eq!(app.range, parent, "scroll-down zoomed back out");
     }
 
     #[test]

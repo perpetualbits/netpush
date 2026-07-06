@@ -182,6 +182,7 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     // Sync the app's cursor state to this frame's grid: the dims set what `Enter` zooms
     // into, and a shrunk terminal may need the cursor clamped back in-bounds.
     app.map_dims = (grid.width, grid.height);
+    app.map_area = body; // remember the grid's screen rect so the mouse can hit-test cells
     app.map_cur = (app.map_cur.0.min(grid.width.saturating_sub(1)), app.map_cur.1.min(grid.height.saturating_sub(1)));
 
     // Row 0 — grid structure + density key (a Gilbert curve has no meaningful linear axis).
