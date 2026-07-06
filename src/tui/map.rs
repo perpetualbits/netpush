@@ -140,7 +140,29 @@ fn hover_glow(hover: Option<usize>, total: usize, clock: f32) -> Vec<f32> {
         .collect()
 }
 
-/// Brighten an RGB colour by `amount` (0..1) — a luma lift that keeps the hue, so the hover glow
+/// The **ambient shimmer** per curve cell: a slow, soft travelling light that threads the whole
+/// curve when idle and *gathers where the estate has structure* — occupied cells lift far more
+/// than empty space — so the shape of the data breathes into view. As if the curve's placement
+/// were a projected image, scrolled slowly back into the light. Palette-true and restrained: two
+/// slow waves at different rates beat together for a non-repeating sheen, kept low-amplitude.
+fn ambient_glow(grid: &MapGrid, total: usize, clock: f32) -> Vec<f32> {
+    use std::f32::consts::TAU;
+    let denom = total.max(1) as f32;
+    (0..total)
+        .map(|d| {
+            let u = d as f32 / denom; // position along the curve, 0..1
+            // Two slow travelling waves (different spatial rates, opposite drift) beat together.
+            let a = 0.5 + 0.5 * ((u * 5.0 - clock * 0.11) * TAU).sin();
+            let b = 0.5 + 0.5 * ((u * 11.0 + clock * 0.06) * TAU).sin();
+            let wave = 0.6 * a + 0.4 * b;
+            // A faint sheen everywhere; much brighter where hosts actually live (structure).
+            let structure = if grid.used[d] > 0 { 0.55 + 0.45 * grid.fraction(d) } else { 0.12 };
+            (wave * structure * 0.5).clamp(0.0, 1.0) // half amplitude — self-assured, not showy
+        })
+        .collect()
+}
+
+/// Brighten an RGB colour by `amount` (0..1) — a luma lift that keeps the hue, so the glow
 /// *lifts* each cell's own palette rather than whitening it. Non-RGB colours are untouched.
 fn lighten(c: Color, amount: f32) -> Color {
     match c {
@@ -317,10 +339,13 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
         .get(app.zoom_sel)
         .map(|(dr, _)| curve_map::pulse_segment(total, dr.clone(), clock * 4.0 * std::f32::consts::PI, 3));
 
-    // The hover glow: a soft luminous band threading the curve, brightest at the synced cell and
-    // fading along the curve (a gaussian), gently pulsing. Keeps each cell's own colour — it
-    // *lifts* the palette rather than washing it out — so the band reads as multicoloured light.
-    let glow = hover_glow(app.hover_d, total, clock);
+    // The curve's light. Pointing at it focuses a soft gaussian band on the synced cell (the hover
+    // sync); idle, a slow ambient shimmer threads the whole curve, gathering where the estate has
+    // structure. Both *lift* each cell's own colour rather than whitening it → multicoloured light.
+    let glow = match app.hover_d {
+        Some(hd) => hover_glow(Some(hd), total, clock),
+        None => ambient_glow(&grid, total, clock),
+    };
 
     // Base layer: occupancy heat / static group tint, then the quadrant pulse and the hover glow.
     curve_map::render(buf, body, grid.gilbert(), |d| {
@@ -502,6 +527,44 @@ mod tests {
             app.set_anim_clock(Some(i as f32 / frames as f32 * 0.5));
             println!("@@@FRAME {i}@@@");
             println!("{}", dump_ansi(&mut app, 100, 40));
+        }
+    }
+
+    /// Dump the **ambient shimmer**: the idle map (no hover) breathing over one slow travelling
+    /// cycle. Run with `cargo test --bin canopy map::tests::dump_ambient -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_ambient() {
+        let (range, facts) = crate::fixture::demo();
+        let mut app = App::new(range, facts, false, false, false, crate::config::Config::default());
+        app.view = super::super::app::View::Map;
+        app.hover_d = None; // idle → ambient shimmer
+        let _ = dump_ansi(&mut app, 96, 44); // fix map_dims
+        let frames = 16;
+        for i in 0..frames {
+            app.set_anim_clock(Some(i as f32 / frames as f32 * 9.0)); // ~one slow sweep
+            println!("@@@FRAME {i}@@@");
+            println!("{}", dump_ansi(&mut app, 96, 44));
+        }
+    }
+
+    /// Dump the **hover sync**: sweep the hover along the curve over the fixture so the glow band
+    /// moves and host names light up in succession. Run with
+    /// `cargo test --bin canopy map::tests::dump_hover -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_hover() {
+        let (range, facts) = crate::fixture::demo();
+        let mut app = App::new(range, facts, false, false, false, crate::config::Config::default());
+        app.view = super::super::app::View::Map;
+        let _ = dump_ansi(&mut app, 96, 44); // fix map_dims
+        let frames = 16;
+        for i in 0..frames {
+            // Sweep the synced cell across the occupied region; advance the pulse clock too.
+            app.hover_d = Some(8 + i * 8);
+            app.set_anim_clock(Some(i as f32 * 0.12));
+            println!("@@@FRAME {i}@@@");
+            println!("{}", dump_ansi(&mut app, 96, 44));
         }
     }
 
