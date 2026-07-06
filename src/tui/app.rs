@@ -170,6 +170,10 @@ pub struct App {
     /// The curve cell (`d` index) the pointer is synchronised to, if any — the shared key of the
     /// hover glow: the cell lights up on the curve and every host inside it lights up in the pane.
     pub hover_d: Option<usize>,
+    /// `true` when the hover came from the **curve** (so the host list should scroll its synced
+    /// hosts to the top — "they scroll to you"); `false` when it came from a name in the pane (the
+    /// pointer is already there, so don't yank the list around under it).
+    pub hover_autoscroll: bool,
     /// An in-flight zoom sweep, if any — the map view suppresses new zooms while it runs.
     zoom_anim: Option<ZoomAnim>,
     /// Parent scopes to return to on zoom-out (each a range + its facts).
@@ -259,6 +263,7 @@ impl App {
         App {
             range,
             total,
+            hover_autoscroll: false,
             facts,
             counts,
             live,
@@ -926,6 +931,28 @@ impl App {
         Some(self.range.slice_index(cells, off) as usize)
     }
 
+    /// Ease the host list so the hosts inside the hovered curve cell **scroll to the top** — "they
+    /// scroll to you". Only when the hover came from the curve (`hover_autoscroll`); a pane hover
+    /// leaves the list still under the pointer. Moves half the remaining gap each frame, so it
+    /// arrives fast and settles smoothly. `visible_rows` is the pane's host-row count, so a target
+    /// already on screen isn't yanked. Idempotent once the target sits at the top.
+    pub fn ease_hosts_to_hover(&mut self, visible_rows: usize) {
+        if !self.hover_autoscroll {
+            return;
+        }
+        let Some(hd) = self.hover_d else { return };
+        let hosts = self.hosts_in_view();
+        let Some(target) = hosts.iter().position(|(a, _)| self.cell_of_addr(*a) == Some(hd)) else { return };
+        let top = self.host_scroll;
+        if target >= top && target < top + visible_rows.max(1) {
+            return; // the first synced host is already visible — leave the list where it is
+        }
+        let (cur, want) = (top as isize, target as isize);
+        let step = ((want - cur) as f32 / 2.0).round() as isize;
+        let step = if step == 0 { (want - cur).signum() } else { step };
+        self.host_scroll = (cur + step).max(0) as usize;
+    }
+
     /// The curve cell of the host under a pointer `row` over the pane's host list, if any — the
     /// reciprocal of the hover sync: pointing at a name lights up its place on the curve.
     fn hover_from_pane_row(&self, row: u16) -> Option<usize> {
@@ -950,7 +977,10 @@ impl App {
             match ev.kind {
                 MouseEventKind::ScrollDown => self.scroll_hosts(3),
                 MouseEventKind::ScrollUp => self.scroll_hosts(-3),
-                MouseEventKind::Moved | MouseEventKind::Drag(_) => self.hover_d = self.hover_from_pane_row(ev.row),
+                MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                    self.hover_d = self.hover_from_pane_row(ev.row);
+                    self.hover_autoscroll = false; // pointer is already in the list — don't yank it
+                }
                 _ => {}
             }
             return;
@@ -961,6 +991,7 @@ impl App {
                     self.zoom_sel = q;
                 }
                 self.hover_d = self.cell_at_mouse(ev.column, ev.row);
+                self.hover_autoscroll = true; // hovering the curve — scroll its hosts to the top
             }
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::ScrollUp => {
                 if let Some(q) = self.quadrant_at(ev.column, ev.row) {
@@ -1722,6 +1753,39 @@ mod tests {
         // Moving off the pane and over empty space clears the sync.
         app.on_mouse(MouseEvent { kind: MouseEventKind::Moved, column: 0, row: 0, modifiers: KeyModifiers::empty() });
         assert_eq!(app.hover_d, None);
+    }
+
+    #[test]
+    fn hovering_a_cell_scrolls_its_hosts_to_you() {
+        // Enough hosts that some sit far below the visible window.
+        let facts: Vec<AddressFacts> = (1..=40u8)
+            .map(|i| AddressFacts { addr: format!("10.87.3.{i}").parse().unwrap(), netbox: None, ptr: Some(format!("h{i}.")), live: true })
+            .collect();
+        let mut app = App::new(Cidr::parse("10.87.3.0/24").unwrap(), facts, false, false, false, Config::default());
+        app.view = View::Map;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 20));
+        crate::tui::map::screen(&mut buf, &mut app); // establishes map_dims / host_list_area
+
+        // Sync to a curve cell as if hovering the curve; the first host in that cell is the target.
+        let hosts = app.hosts_in_view();
+        let hd = app.cell_of_addr(hosts.last().unwrap().0);
+        let target = hosts.iter().position(|(a, _)| app.cell_of_addr(*a) == hd).unwrap();
+        app.hover_d = hd;
+        app.hover_autoscroll = true;
+        let rows = app.host_list_area.height as usize;
+        assert!(target >= rows, "target starts off-screen, so the scroll is meaningful");
+
+        // Repeated frames ease the list until the target host is within the window ("scrolls to you").
+        for _ in 0..12 {
+            app.ease_hosts_to_hover(rows);
+        }
+        assert!(app.host_scroll <= target && target < app.host_scroll + rows.max(1), "the hovered cell's host scrolled into view");
+
+        // A pane-driven hover must NOT autoscroll — the pointer is already in the list.
+        app.hover_autoscroll = false;
+        let fixed = app.host_scroll;
+        app.ease_hosts_to_hover(rows);
+        assert_eq!(app.host_scroll, fixed, "pane hover leaves the list still");
     }
 
     #[test]

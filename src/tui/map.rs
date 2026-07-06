@@ -23,9 +23,11 @@
 //! zooms back out, so a few steps take a `/8` down to where the table and tree resolve to
 //! single addresses.
 
+use std::net::IpAddr;
+
 use mullion::border::{BorderStyle, CornerStyle, LineWeight};
 use mullion::curve_map;
-use mullion::style::Color;
+use mullion::style::{Color, Style};
 use mullion::{Buffer, Rect};
 
 use super::app::App;
@@ -129,13 +131,15 @@ fn paint_bitstream(buf: &mut Buffer, x: u16, y: u16, band: usize, pos: f32, t: f
 /// is hovered. Returned as an owned `Vec` so the render closures can index it cheaply.
 fn hover_glow(hover: Option<usize>, total: usize, clock: f32) -> Vec<f32> {
     let Some(hd) = hover else { return Vec::new() };
-    const SIGMA: f32 = 3.0;
-    let pulse = 0.65 + 0.35 * (clock * std::f32::consts::TAU * 0.7).sin(); // slow, restrained breath
+    // A tight, bright core: a small sigma keeps the beacon focused so raising the amplitude reads as
+    // *brighter*, not as a wide white smear — the gaussian falloff still carries the glow's gradient.
+    const SIGMA: f32 = 2.4;
+    let pulse = 0.85 + 0.15 * (clock * std::f32::consts::TAU * 0.7).sin(); // steadier, so it stays bright
     (0..total)
         .map(|d| {
             let dist = (d as isize - hd as isize).abs() as f32;
             let g = (-(dist * dist) / (2.0 * SIGMA * SIGMA)).exp();
-            (g * pulse * 0.9).clamp(0.0, 1.0)
+            (g * pulse * 1.7).clamp(0.0, 1.7) // much brighter than the ambient/quadrant lifts
         })
         .collect()
 }
@@ -167,12 +171,27 @@ fn ambient_glow(grid: &MapGrid, total: usize, clock: f32) -> Vec<f32> {
 fn lighten(c: Color, amount: f32) -> Color {
     match c {
         Color::Rgb(r, g, b) => {
-            let f = 1.0 + amount.clamp(0.0, 1.0);
+            let f = 1.0 + amount.clamp(0.0, 1.7);
             let s = |v: u8| (f32::from(v) * f).round().min(255.0) as u8;
             Color::Rgb(s(r), s(g), s(b))
         }
         other => other,
     }
+}
+
+/// The colour a synced host lights up in: the **same hue as its block on the curve**, at full
+/// brightness — deliberately *not* the cursor blue, so the name and its cell read as one thing. A
+/// host in a group glows in the group's hue; an ungrouped host in a bright warm tone that matches
+/// the occupancy heat of the curve.
+fn synced_style(app: &App, addr: IpAddr) -> Style {
+    let fg = match app.grouping.group_of(addr) {
+        Some(g) => {
+            let l = app.grouping.look(&g.id);
+            super::palette::hsl_rgb(l.hue, l.sat.max(0.55), 0.70)
+        }
+        None => Color::Rgb(235, 214, 170), // bright warm, matching the occupancy ramp — never blue
+    };
+    Style::default().fg(fg)
 }
 
 /// The compact **two-column field strip** across the top: VIEW + SUBNET in the left column, PATH +
@@ -229,7 +248,7 @@ fn draw_host_list(buf: &mut Buffer, list_box: Rect, app: &App) -> Rect {
     btxt(buf, list_box.x + 2, list_box.y, &clip(&label, list_box.width.saturating_sub(4)), s_dim());
     for (i, (addr, name)) in hosts.iter().skip(scroll).take(rows).enumerate() {
         let synced = app.hover_d.is_some() && app.cell_of_addr(*addr) == app.hover_d;
-        let style = if synced { s_sel() } else { s_dim() };
+        let style = if synced { synced_style(app, *addr) } else { s_dim() };
         btxt(buf, list_box.x + 1, list_box.y + 1 + i as u16, &clip(&format!("{addr}  {name}"), text_w), style);
     }
     // A scrollbar on the right inside edge shows where the window sits in the whole list.
@@ -330,15 +349,18 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     let qglow = quads
         .get(app.zoom_sel)
         .map(|(dr, _)| curve_map::pulse_segment(total, dr.clone(), clock * std::f32::consts::TAU * 0.4, 4));
+    let hovering = app.hover_d.is_some();
     let ambient = match app.hover_d {
         Some(hd) => hover_glow(Some(hd), total, clock),
         None => ambient_glow(&grid, total, clock),
     };
+    // The hover beacon is allowed to burn far brighter than the idle shimmer's restrained ceiling.
+    let cap = if hovering { 1.7 } else { 0.85 };
     let lift: Vec<f32> = (0..total)
         .map(|d| {
             let base = ambient.get(d).copied().unwrap_or(0.0);
             let q = qglow.as_ref().map_or(0.0, |p| p(d) * 0.5);
-            (base + q).min(0.85)
+            (base + q).min(cap)
         })
         .collect();
 
@@ -394,6 +416,8 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     let list_x = edge.x + edge.width + 2;
     let list_box = Rect::new(list_x, edge.y, (area.x + area.width).saturating_sub(list_x), edge.height);
     app.pane_area = list_box;
+    // Bring the hovered cell's hosts to the top of the list before painting — "they scroll to you".
+    app.ease_hosts_to_hover(list_box.height.saturating_sub(2) as usize);
     app.host_list_area = if list_box.width >= 16 { draw_host_list(buf, list_box, app) } else { Rect::new(0, 0, 0, 0) };
 
     // The two-column field strip across the top.
