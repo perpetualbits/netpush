@@ -188,7 +188,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     if args.list_groups {
-        list_groups(&facts, &args.site);
+        // Native NetBox clusters are authoritative but only reachable live; offline we group by
+        // inference (and any staging file) alone.
+        let native = if args.live { live::gather_native_clusters(&range, &cfg)? } else { Vec::new() };
+        list_groups(&facts, &args.site, native);
         return Ok(());
     }
 
@@ -413,7 +416,7 @@ fn demo_v6_facts(range: &Cidr) -> Vec<AddressFacts> {
 ///
 /// Read-only: it only *shows* the tags; nothing is written. The point is to make the pending
 /// NetBox work legible before any write path exists.
-fn list_groups(facts: &[reconcile::AddressFacts], site: &str) {
+fn list_groups(facts: &[reconcile::AddressFacts], site: &str, native: Vec<group::NativeCluster>) {
     let map: std::collections::HashMap<std::net::IpAddr, reconcile::AddressFacts> =
         facts.iter().cloned().map(|f| (f.addr, f)).collect();
 
@@ -430,7 +433,8 @@ fn list_groups(facts: &[reconcile::AddressFacts], site: &str) {
         Err(_) => Vec::new(),
     };
 
-    let grouping = group::merge(asserted, Vec::new(), group::infer(&map));
+    let native_groups = group::from_native(native);
+    let grouping = group::merge(asserted, native_groups, group::infer(&map));
     if grouping.groups.is_empty() {
         println!("(no groups — no named hosts to infer from and no {} )", config::groups_path(site).display());
         return;

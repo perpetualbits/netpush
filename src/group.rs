@@ -109,9 +109,6 @@ pub enum Origin {
     /// A human said so in `groups.toml`. Highest priority; a candidate to push to NetBox.
     Asserted,
     /// Read from a native NetBox cluster (its object id). Already in NetBox — nothing to push.
-    // Constructed once the NetBox cluster fetch lands (the 34 native hypervisor clusters); the
-    // fusion, ranking and display already handle it, so it is a forward-declared arm, not dead.
-    #[allow(dead_code)]
     Netbox { cluster_id: u32 },
     /// Guessed from the naming scheme / role / subdomain. Lowest priority; the weakest evidence
     /// and the strongest candidate for a human to confirm and push.
@@ -382,6 +379,50 @@ fn best_host(f: &AddressFacts) -> Option<String> {
     nb.or(f.ptr.as_deref()).map(normalize).filter(|s| !s.is_empty())
 }
 
+// ─── native NetBox clusters ────────────────────────────────────────────────────────────────
+
+/// A native NetBox cluster, reduced to what grouping needs: its object id, display name, and the
+/// members (IP + hostname) resolved from the cluster's VMs. The live fetch (`sources::netbox`)
+/// builds these by joining clusters → VMs → VM-interface IPs; this module stays I/O-free and
+/// only turns them into groups.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeCluster {
+    /// The NetBox cluster object id (the durable handle, and what [`Origin::Netbox`] records).
+    pub id: u32,
+    /// The cluster's display name (e.g. `aether`).
+    pub name: String,
+    /// Its members, resolved from the cluster's VM IP addresses.
+    pub members: Vec<Member>,
+}
+
+/// Turn fetched native clusters into [`Origin::Netbox`] groups — the authoritative middle tier
+/// of the fusion (above inference, below a human assertion). A cluster with no resolved members
+/// is dropped (nothing to place). Members are sorted by address and the groups by slug, so the
+/// result is deterministic.
+///
+/// These are the real thing NetBox already records, so they need no write-back — [`needs_push`]
+/// is false for every group produced here.
+#[must_use]
+pub fn from_native(clusters: Vec<NativeCluster>) -> Vec<Group> {
+    let mut groups: Vec<Group> = clusters
+        .into_iter()
+        .filter(|c| !c.members.is_empty())
+        .map(|c| {
+            let mut members = c.members;
+            members.sort_by_key(|m| m.addr);
+            Group {
+                id: GroupId::slug(&c.name),
+                label: c.name,
+                kind: GroupKind::Cluster,
+                origin: Origin::Netbox { cluster_id: c.id },
+                members,
+            }
+        })
+        .collect();
+    groups.sort_by(|a, b| a.id.cmp(&b.id));
+    groups
+}
+
 // ─── fusion ────────────────────────────────────────────────────────────────────────────────
 
 /// Fuse asserted, native and inferred groups into one [`Grouping`], resolving overlaps by
@@ -561,6 +602,25 @@ mod tests {
         let native = Group { origin: Origin::Netbox { cluster_id: 7 }, ..g };
         assert_eq!(native.netbox_target(), NetboxTarget::Cluster(7));
         assert!(!native.needs_push());
+    }
+
+    /// A native cluster becomes an `Origin::Netbox` group that needs no push, and out-ranks an
+    /// inferred family for a shared address.
+    #[test]
+    fn native_cluster_becomes_netbox_group_and_wins() {
+        let native = from_native(vec![NativeCluster {
+            id: 42,
+            name: "aether".into(),
+            members: vec![Member { addr: Some(v4(20)), host: Some("vm-a".into()) }],
+        }]);
+        assert_eq!(native.len(), 1);
+        assert_eq!(native[0].origin, Origin::Netbox { cluster_id: 42 });
+        assert!(!native[0].needs_push()); // already in NetBox
+
+        // .20 is also seen by inference as some family; native must win.
+        let inferred = infer(&[ptr(20, "aether-node1.astron.nl"), ptr(21, "aether-node2.astron.nl")].into_iter().collect());
+        let g = merge(Vec::new(), native, inferred);
+        assert_eq!(g.group_of(v4(20)).unwrap().origin, Origin::Netbox { cluster_id: 42 });
     }
 
     /// Fusion: an asserted group out-ranks an inferred one for a shared address.

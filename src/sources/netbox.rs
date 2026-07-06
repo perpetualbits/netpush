@@ -149,6 +149,48 @@ impl NetboxSource {
         Ok(out)
     }
 
+    /// Gather the **native NetBox clusters** whose VM members have an IP inside `range`, as
+    /// [`group::NativeCluster`]s ready for [`group::from_native`]. Read-only.
+    ///
+    /// The join is three fetches: clusters (`id → name`), virtual-machines (`vm_id → cluster,
+    /// name`), and the range's IP objects (`vm-interface IP → vm_id`). A cluster with no member
+    /// IP in `range` never appears, so `--range` scopes the result the same way the map does.
+    ///
+    /// # Errors
+    /// Propagates SSH/HTTP failures or a non-JSON body from any of the three endpoints.
+    pub fn gather_native_clusters(&self, range: &Cidr) -> anyhow::Result<Vec<crate::group::NativeCluster>> {
+        use std::collections::HashMap;
+        let base = self.base_url.trim_end_matches('/');
+
+        // 1. cluster id → name
+        let mut cluster_name: HashMap<u32, String> = HashMap::new();
+        for json in self.paginate(format!("{base}/api/virtualization/clusters/?limit=1000"))? {
+            cluster_name.extend(parse_clusters(&json)?);
+        }
+        // 2. vm id → (cluster id, vm name)
+        let mut vm_cluster: HashMap<u32, (u32, String)> = HashMap::new();
+        for json in self.paginate(format!("{base}/api/virtualization/virtual-machines/?limit=1000"))? {
+            vm_cluster.extend(parse_vms(&json)?);
+        }
+        // 3. VM-interface IPs in range → attach to their cluster via the VM.
+        let (net, pl) = (range.network(), range.prefix_len);
+        let mut members: HashMap<u32, Vec<crate::group::Member>> = HashMap::new();
+        for json in self.paginate(format!("{base}/api/ipam/ip-addresses/?parent={net}/{pl}&limit=1000"))? {
+            for (vm_id, addr, dns) in parse_vm_ip_members(&json, range)? {
+                let Some((cid, vm_name)) = vm_cluster.get(&vm_id) else { continue };
+                let host = dns.or_else(|| Some(vm_name.clone()));
+                members.entry(*cid).or_default().push(crate::group::Member { addr: Some(addr), host });
+            }
+        }
+
+        Ok(members
+            .into_iter()
+            .filter_map(|(cid, members)| {
+                cluster_name.get(&cid).map(|name| crate::group::NativeCluster { id: cid, name: name.clone(), members })
+            })
+            .collect())
+    }
+
     /// Follow NetBox's `next` links from `first`, returning every page's raw JSON body.
     ///
     /// NetBox paginates list endpoints (`{count, next, results}`); a single `limit=1000`
@@ -313,9 +355,97 @@ pub fn parse_ip_addresses(json: &str, range: &Cidr) -> anyhow::Result<Vec<Addres
     Ok(out)
 }
 
+/// Parse a `virtualization/clusters` page into `(id, name)` pairs. Objects missing an id or
+/// name are skipped.
+///
+/// # Errors
+/// Fails if the body is not the expected `{results: [...]}` JSON.
+pub fn parse_clusters(json: &str) -> anyhow::Result<Vec<(u32, String)>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("NetBox clusters response was not JSON")?;
+    let results = v.get("results").and_then(|r| r.as_array()).context("clusters response had no `results`")?;
+    Ok(results
+        .iter()
+        .filter_map(|o| {
+            let id = u32::try_from(o.get("id")?.as_u64()?).ok()?;
+            let name = o.get("name")?.as_str()?.to_string();
+            Some((id, name))
+        })
+        .collect())
+}
+
+/// Parse a `virtualization/virtual-machines` page into `vm_id → (cluster_id, vm_name)`. VMs
+/// with no cluster are skipped (they contribute no native-cluster membership).
+///
+/// # Errors
+/// Fails if the body is not the expected `{results: [...]}` JSON.
+pub fn parse_vms(json: &str) -> anyhow::Result<Vec<(u32, (u32, String))>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("NetBox VMs response was not JSON")?;
+    let results = v.get("results").and_then(|r| r.as_array()).context("VMs response had no `results`")?;
+    Ok(results
+        .iter()
+        .filter_map(|o| {
+            let id = u32::try_from(o.get("id")?.as_u64()?).ok()?;
+            let cid = u32::try_from(o.get("cluster")?.get("id")?.as_u64()?).ok()?;
+            let name = o.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            Some((id, (cid, name)))
+        })
+        .collect())
+}
+
+/// Parse an `ip-addresses` page into `(vm_id, addr, dns_name)` for the objects assigned to a
+/// **VM interface** and lying inside `range`. Device-assigned and unassigned IPs are skipped —
+/// only VM IPs carry a native cluster. `dns_name` is `None` when empty.
+///
+/// # Errors
+/// Fails if the body is not the expected `{results: [...]}` JSON.
+pub fn parse_vm_ip_members(json: &str, range: &Cidr) -> anyhow::Result<Vec<(u32, std::net::IpAddr, Option<String>)>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("NetBox ip-addresses response was not JSON")?;
+    let results = v.get("results").and_then(|r| r.as_array()).context("ip-addresses response had no `results`")?;
+    Ok(results
+        .iter()
+        .filter_map(|o| {
+            if o.get("assigned_object_type").and_then(|t| t.as_str()) != Some("virtualization.vminterface") {
+                return None;
+            }
+            let addr: std::net::IpAddr = o.get("address")?.as_str()?.split('/').next()?.parse().ok()?;
+            if !range.contains(addr) {
+                return None;
+            }
+            let vm_id = u32::try_from(o.get("assigned_object")?.get("virtual_machine")?.get("id")?.as_u64()?).ok()?;
+            let dns = o.get("dns_name").and_then(|d| d.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+            Some((vm_id, addr, dns))
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The native-cluster join: cluster name + VM→cluster + VM-interface IP all resolve, and a
+    /// device-assigned IP is ignored.
+    #[test]
+    fn parses_native_cluster_join() {
+        let range = Cidr::parse("10.87.0.0/16").unwrap();
+        let clusters = parse_clusters(r#"{"results":[{"id":7,"name":"aether"}]}"#).unwrap();
+        assert_eq!(clusters, vec![(7, "aether".to_string())]);
+
+        let vms = parse_vms(r#"{"results":[{"id":35,"name":"maas","cluster":{"id":7}},{"id":36,"name":"noclust"}]}"#).unwrap();
+        assert_eq!(vms.len(), 1); // the cluster-less VM is dropped
+        assert_eq!(vms[0], (35, (7, "maas".to_string())));
+
+        let ips = parse_vm_ip_members(
+            r#"{"results":[
+                {"address":"10.87.5.9/24","dns_name":"maas.astron.nl","assigned_object_type":"virtualization.vminterface","assigned_object":{"virtual_machine":{"id":35}}},
+                {"address":"10.87.5.10/24","dns_name":"bare.astron.nl","assigned_object_type":"dcim.interface","assigned_object":{"device":{"id":1}}}
+            ]}"#,
+            &range,
+        )
+        .unwrap();
+        assert_eq!(ips.len(), 1); // the device-assigned IP is skipped
+        assert_eq!(ips[0].0, 35);
+        assert_eq!(ips[0].2.as_deref(), Some("maas.astron.nl"));
+    }
 
     #[test]
     fn parses_addresses_and_names() {

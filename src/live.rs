@@ -108,6 +108,21 @@ pub fn gather_inventory(range: &Cidr, cfg: &Config) -> anyhow::Result<crate::sou
     netbox.gather_inventory(range)
 }
 
+/// Gather the native NetBox clusters whose members fall in `range`, fetching the token first.
+/// Read-only; used by `--list-groups --live` to fold NetBox's own clusters into the grouping.
+///
+/// # Errors
+/// Propagates a token failure or the NetBox fetch.
+pub fn gather_native_clusters(range: &Cidr, cfg: &Config) -> anyhow::Result<Vec<crate::group::NativeCluster>> {
+    let token = get_token(&cfg.token_pass)?;
+    let netbox = NetboxSource {
+        vantage: Vantage::with_jump(&cfg.vantage, &cfg.jump),
+        base_url: cfg.netbox_url.clone(),
+        token,
+    };
+    netbox.gather_native_clusters(range)
+}
+
 /// Fetch the NetBox token from `$CANOPY_NETBOX_TOKEN`, else from `pass`.
 ///
 /// Keeping it out of argv and config: the env var wins for CI, otherwise we shell
