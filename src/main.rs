@@ -13,6 +13,7 @@ mod config;
 mod discover;
 mod dns;
 mod dns_discovery;
+mod fabric;
 mod fixture;
 mod graph;
 mod group;
