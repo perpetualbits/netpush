@@ -10,6 +10,7 @@
 //! is unused from the binary's perspective, so dead-code warnings are allowed here.
 #![allow(dead_code)]
 
+pub mod collect;
 pub mod inventory;
 pub mod profile;
 pub mod store;
