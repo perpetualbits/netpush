@@ -149,6 +149,11 @@ struct Args {
     /// Site-wide ProxyJump chain for fabric devices that set none.
     #[arg(long, value_name = "CHAIN", default_value = "")]
     fabric_jump: String,
+
+    /// Site-wide SSH identity (private-key) file for fabric collection, used for devices
+    /// whose `[[device]]` entry sets no `identity_file`.
+    #[arg(long, value_name = "FILE")]
+    fabric_identity: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -336,7 +341,13 @@ fn run_fabric_collect(args: &Args, device_name: &str) -> anyhow::Result<()> {
         anyhow::anyhow!("device '{device_name}' not in inventory {}", site_file.display())
     })?;
 
-    let vantage = device.vantage(&args.fabric_jump);
+    // Per-device identity_file wins; otherwise fall back to the site-wide --fabric-identity.
+    let mut vantage = device.vantage(&args.fabric_jump);
+    if vantage.identity.is_none() {
+        if let Some(id) = &args.fabric_identity {
+            vantage = vantage.with_identity(Some(id.clone()));
+        }
+    }
 
     // Resolve the profile: configured os, else detect from a first `show version`.
     let os = match &device.os {

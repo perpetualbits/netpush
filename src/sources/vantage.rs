@@ -19,6 +19,10 @@ pub struct Vantage {
     /// `"bastion.astron.nl"` or a chain `"portal.lofar.eu,inner.host"`. Empty = connect
     /// directly. Passed as `ssh -J <jump>`; `~/.ssh/config` is still honoured on top.
     pub jump: String,
+    /// Optional SSH identity (private-key) file, passed as `ssh -i <path>`. `None`
+    /// leaves key selection to `~/.ssh/config` / the agent — how the DNS/NetBox
+    /// vantages connect; the fabric collector sets it per device (or a site key).
+    pub identity: Option<String>,
 }
 
 impl Vantage {
@@ -26,12 +30,22 @@ impl Vantage {
     /// `jump` means connect directly.
     #[must_use]
     pub fn with_jump(host: impl Into<String>, jump: impl Into<String>) -> Self {
-        Self { host: host.into(), jump: jump.into() }
+        Self { host: host.into(), jump: jump.into(), identity: None }
+    }
+
+    /// Set the SSH identity (private-key) file used to authenticate — `ssh -i <path>`.
+    /// Builder-style, so existing call sites (which never set a key) are unaffected;
+    /// `None` leaves it unset.
+    #[must_use]
+    pub fn with_identity(mut self, identity: Option<String>) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// The full `ssh` argument list for running `remote_cmd` on this vantage: the fixed
-    /// non-interactive options, a `-J <jump>` when a jump chain is set, then the host and
-    /// the command. Pure, so the jump wiring is unit-testable without spawning ssh.
+    /// non-interactive options, a `-i <key>` when an identity file is set, a `-J <jump>`
+    /// when a jump chain is set, then the host and the command. Pure, so the identity and
+    /// jump wiring is unit-testable without spawning ssh.
     #[must_use]
     fn ssh_argv(&self, remote_cmd: &str) -> Vec<String> {
         let mut argv = vec![
@@ -40,6 +54,10 @@ impl Vantage {
             "-o".into(),
             "ConnectTimeout=20".into(),
         ];
+        if let Some(id) = &self.identity {
+            argv.push("-i".into());
+            argv.push(id.clone());
+        }
         if !self.jump.is_empty() {
             argv.push("-J".into());
             argv.push(self.jump.clone());
@@ -137,6 +155,23 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "-J")); // no ProxyJump
         // Host and command are the last two arguments.
         assert_eq!(&argv[argv.len() - 2..], &["dns1.astron.nl".to_string(), "echo hi".to_string()]);
+    }
+
+    #[test]
+    fn ssh_argv_includes_identity_when_set() {
+        let v = Vantage::with_jump("10.0.0.1", "").with_identity(Some("/home/u/.ssh/key".into()));
+        let argv = v.ssh_argv("show version");
+        let i = argv.iter().position(|a| a == "-i").expect("a -i flag");
+        assert_eq!(argv[i + 1], "/home/u/.ssh/key");
+        // The identity comes before the destination host.
+        let h = argv.iter().position(|a| a == "10.0.0.1").unwrap();
+        assert!(i < h);
+    }
+
+    #[test]
+    fn ssh_argv_has_no_identity_flag_by_default() {
+        let v = Vantage::with_jump("10.0.0.1", "");
+        assert!(!v.ssh_argv("show version").iter().any(|a| a == "-i"));
     }
 
     #[test]

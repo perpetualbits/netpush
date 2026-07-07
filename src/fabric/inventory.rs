@@ -25,6 +25,10 @@ pub struct Device {
     /// Optional platform id (`junos-evo`, `junos`); auto-detected on first collect if absent.
     #[serde(default)]
     pub os: Option<String>,
+    /// Optional per-device SSH identity (private-key) file, passed as `ssh -i`. Absent
+    /// falls back to the collector's site-wide key (or `~/.ssh/config`).
+    #[serde(default)]
+    pub identity_file: Option<String>,
 }
 
 impl Device {
@@ -38,11 +42,13 @@ impl Device {
     }
 
     /// A [`Vantage`] for reaching this device: the per-device `jump` if set, else
-    /// `site_jump` (which may itself be empty for a direct connection).
+    /// `site_jump` (which may itself be empty for a direct connection), and the
+    /// per-device `identity_file` (a site-wide fallback key is applied by the caller
+    /// when this is `None`).
     #[must_use]
     pub fn vantage(&self, site_jump: &str) -> Vantage {
         let jump = self.jump.clone().unwrap_or_else(|| site_jump.to_string());
-        Vantage::with_jump(self.ssh_host(), jump)
+        Vantage::with_jump(self.ssh_host(), jump).with_identity(self.identity_file.clone())
     }
 }
 
@@ -124,5 +130,19 @@ mod tests {
         let inv = Inventory::from_toml_str(SAMPLE).unwrap();
         assert_eq!(inv.get("lofar-core-router-re0").unwrap().ssh_host(), "nagtegaal@10.155.250.1");
         assert_eq!(inv.get("acx-a2-0").unwrap().ssh_host(), "10.155.251.23");
+    }
+
+    #[test]
+    fn vantage_carries_the_devices_identity_file() {
+        let inv = Inventory::from_toml_str(
+            r#"[[device]]
+               name = "d"
+               host = "10.0.0.1"
+               identity_file = "/keys/id_rsa""#,
+        )
+        .unwrap();
+        assert_eq!(inv.get("d").unwrap().vantage("").identity.as_deref(), Some("/keys/id_rsa"));
+        // absent identity_file -> None (falls back to caller's site key / ssh_config)
+        assert!(Inventory::from_toml_str(SAMPLE).unwrap().get("acx-a2-0").unwrap().vantage("").identity.is_none());
     }
 }
