@@ -13,6 +13,7 @@ mod config;
 mod discover;
 mod dns;
 mod dns_discovery;
+mod fabric;
 mod fixture;
 mod graph;
 mod group;
@@ -131,6 +132,23 @@ struct Args {
     /// network (e.g. 10.87.0.0/20 → pass --alloc-prefix 20).
     #[arg(long, value_name = "LEN")]
     alloc_prefix: Option<u8>,
+
+    /// Collect read-only diagnostics from a fabric device (by inventory name) into a
+    /// versioned snapshot, then exit. Read-only.
+    #[arg(long, value_name = "DEVICE")]
+    fabric_collect: Option<String>,
+
+    /// Artifact bundle(s) to collect with --fabric-collect (repeatable); omitted = all.
+    #[arg(long = "bundle", value_name = "BUNDLE")]
+    bundles: Vec<String>,
+
+    /// Inventory/site TOML holding the [[device]] array (default: conf.d/<site>.toml).
+    #[arg(long, value_name = "FILE")]
+    fabric_site_file: Option<PathBuf>,
+
+    /// Site-wide ProxyJump chain for fabric devices that set none.
+    #[arg(long, value_name = "CHAIN", default_value = "")]
+    fabric_jump: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -149,6 +167,11 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(v) = &args.token_pass {
         cfg.token_pass = v.clone();
+    }
+
+    // Collect a fabric device's diagnostics into a versioned snapshot (read-only).
+    if let Some(device) = &args.fabric_collect {
+        return run_fabric_collect(&args, device);
     }
 
     // Discover the DNS estate and print it for the site config (read-only).
@@ -289,6 +312,54 @@ fn run_save_estate(args: &Args, cfg: &Config) -> anyhow::Result<()> {
         eprintln!("(dry-run — pass --write to save to {})", path.display());
     }
     Ok(())
+}
+
+/// Handle `--fabric-collect <DEVICE>`: collect a device's artifacts into a snapshot.
+///
+/// Resolves the device's profile from its inventory `os`, or — if unset — by running a
+/// first `show version` on the device's [`Vantage`] and sniffing the vendor banner. Read-only.
+///
+/// # Errors
+/// Propagates inventory load/lookup failures, an unrecognised OS, or a collection failure.
+fn run_fabric_collect(args: &Args, device_name: &str) -> anyhow::Result<()> {
+    use fabric::collect::{collect, detect_os, CommandRunner};
+    use fabric::inventory::Inventory;
+    use fabric::profile::Profile;
+    use fabric::store::Store;
+
+    let site_file = args
+        .fabric_site_file
+        .clone()
+        .unwrap_or_else(|| default_site_file(&args.site));
+    let inv = Inventory::load(&site_file)?;
+    let device = inv.get(device_name).ok_or_else(|| {
+        anyhow::anyhow!("device '{device_name}' not in inventory {}", site_file.display())
+    })?;
+
+    let vantage = device.vantage(&args.fabric_jump);
+
+    // Resolve the profile: configured os, else detect from a first `show version`.
+    let os = match &device.os {
+        Some(os) => os.clone(),
+        None => detect_os(&vantage.exec("show version")?).to_string(),
+    };
+    let profile = Profile::builtin(&os)?;
+
+    let store = Store::new(Store::default_root());
+    let now = chrono::Utc::now();
+    let dir = collect(&vantage, device, &profile, &args.bundles, &store, &args.site, &args.fabric_jump, now)?;
+
+    let n = profile.select(&args.bundles).len();
+    println!("collected {n} artifact(s) from {} -> {}", device.name, dir.display());
+    Ok(())
+}
+
+/// Default inventory path: `$XDG_CONFIG_HOME` (or `~/.config`) + `/canopy/conf.d/<site>.toml`.
+fn default_site_file(site: &str) -> PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| {
+        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
+    });
+    base.join("canopy").join("conf.d").join(format!("{site}.toml"))
 }
 
 /// The block browsed offline when no range is pinned — the fixture's `/24`, so canopy
@@ -672,5 +743,20 @@ fn plural(n: u128) -> &'static str {
         ""
     } else {
         "s"
+    }
+}
+
+#[cfg(test)]
+mod fabric_cli_tests {
+    use super::*;
+
+    #[test]
+    fn default_site_file_uses_xdg_config_home() {
+        std::env::set_var("XDG_CONFIG_HOME", "/x/cfg");
+        assert_eq!(
+            default_site_file("astron"),
+            PathBuf::from("/x/cfg/canopy/conf.d/astron.toml")
+        );
+        std::env::remove_var("XDG_CONFIG_HOME");
     }
 }

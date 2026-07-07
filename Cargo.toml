@@ -25,6 +25,13 @@ toml       = "0.8"
 toml_edit  = "0.22"
 # mullion is Roland's terminal-UI tiling engine; census is built on it too.
 mullion    = { path = "../mullion", version = "0.3.0" }
+# Artifact checksums for tamper-evident manifests.
+sha2       = "0.10"
+# UTC timestamps for snapshot ids and device-clock skew.
+chrono     = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 strip = true

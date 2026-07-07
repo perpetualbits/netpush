@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026  Epsilon Null Operation
+# Built-in collection profile for Junos EVO (ACX7024, PTX10004, ...).
+os = "junos-evo"
+
+[artifact.version]
+cmd = "show version"
+bundle = ["identity", "support", "forensic"]
+
+[artifact.uptime]
+cmd = "show system uptime"
+bundle = ["identity", "forensic"]
+
+[artifact.chassis-hardware]
+cmd = "show chassis hardware"
+bundle = ["identity", "support", "forensic"]
+
+[artifact.chassis-environment]
+cmd = "show chassis environment"
+bundle = ["forensic"]
+
+[artifact.config-set]
+cmd = "show configuration | display set"
+bundle = ["config"]
+format = "junos-set"
+
+[artifact.config-native]
+cmd = "show configuration"
+bundle = ["config"]
+format = "junos"
+
+[artifact.lldp]
+cmd = "show lldp neighbors"
+bundle = ["topology", "support"]
+
+[artifact.interfaces-descriptions]
+cmd = "show interfaces descriptions"
+bundle = ["topology", "support"]
+
+[artifact.interfaces-terse]
+cmd = "show interfaces terse"
+bundle = ["state", "support"]
+
+[artifact.interface-errors]
+cmd = "show interfaces extensive | match \"error|CRC|FEC|drop|framing\""
+bundle = ["forensic"]
+
+[artifact.optics]
+cmd = "show interfaces diagnostics optics"
+bundle = ["forensic"]
+
+[artifact.arp]
+cmd = "show arp no-resolve"
+bundle = ["state"]
+
+[artifact.system-alarms]
+cmd = "show system alarms"
+bundle = ["state", "support", "forensic"]
+
+[artifact.chassis-alarms]
+cmd = "show chassis alarms"
+bundle = ["state", "support", "forensic"]
+
+[artifact.log-messages]
+cmd = "show log messages | last 400"
+bundle = ["logs", "support", "forensic"]
+
+[artifact.rsi]
+cmd = "request support information"
+bundle = ["support"]
+heavy = true
