@@ -75,6 +75,42 @@ impl Vantage {
         self.run_inner(remote_cmd, None)
     }
 
+    /// Run `remote_cmd` and return its stdout together with its exit status, WITHOUT
+    /// failing on a non-zero *remote* exit — the fabric collector records per-artifact
+    /// failures rather than aborting the whole run. A connection/authentication failure
+    /// (ssh exit 255) is still a hard `Err`. On a non-zero remote exit, stderr is
+    /// appended to the returned stdout so the stored artifact shows what the device said.
+    ///
+    /// # Errors
+    /// Fails if ssh cannot be spawned, or the connection/auth fails (ssh exit 255).
+    pub fn run_capture(&self, remote_cmd: &str) -> anyhow::Result<(String, i32)> {
+        let out = Command::new("ssh")
+            .args(self.ssh_argv(remote_cmd))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawning ssh to {}", self.host))?
+            .wait_with_output()
+            .context("waiting for ssh")?;
+        let code = out.status.code().unwrap_or(-1);
+        if code == 255 {
+            let err = String::from_utf8_lossy(&out.stderr);
+            bail!("ssh {} connection/auth failed: {}", self.host, err.trim());
+        }
+        let mut body = String::from_utf8_lossy(&out.stdout).into_owned();
+        if code != 0 {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let err = err.trim();
+            if !err.is_empty() {
+                body.push_str("\n--- stderr ---\n");
+                body.push_str(err);
+                body.push('\n');
+            }
+        }
+        Ok((body, code))
+    }
+
     /// Run `remote_cmd`, feeding `stdin` to it — used to hand a secret (the NetBox
     /// token) to a remote `read VAR` so it never appears in any process's argv.
     ///

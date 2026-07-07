@@ -352,16 +352,22 @@ fn run_fabric_collect(args: &Args, device_name: &str) -> anyhow::Result<()> {
     // Resolve the profile: configured os, else detect from a first `show version`.
     let os = match &device.os {
         Some(os) => os.clone(),
-        None => detect_os(&vantage.exec("show version")?).to_string(),
+        None => detect_os(&vantage.exec("show version")?.stdout).to_string(),
     };
     let profile = Profile::builtin(&os)?;
 
     let store = Store::new(Store::default_root());
     let now = chrono::Utc::now();
-    let dir = collect(&vantage, device, &profile, &args.bundles, &store, &args.site, &args.fabric_jump, now)?;
+    let s = collect(&vantage, device, &profile, &args.bundles, &store, &args.site, &args.fabric_jump, now)?;
 
-    let n = profile.select(&args.bundles).len();
-    println!("collected {n} artifact(s) from {} -> {}", device.name, dir.display());
+    if s.failed > 0 {
+        println!(
+            "collected {} of {} artifact(s) ({} failed) from {} -> {}",
+            s.total - s.failed, s.total, s.failed, device.name, s.dir.display()
+        );
+    } else {
+        println!("collected {} artifact(s) from {} -> {}", s.total, device.name, s.dir.display());
+    }
     Ok(())
 }
 
