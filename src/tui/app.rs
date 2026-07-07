@@ -58,6 +58,29 @@ struct ZoomAnim {
     pending: Option<(AddrRange, Rc<HashMap<IpAddr, AddressFacts>>)>,
 }
 
+/// How far a lasso [`Lasso`] snaps its raw endpoints outward — the "smart" in smart lasso.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LassoSnap {
+    /// Exactly the cells between the two endpoints — a free-hand snake along the curve.
+    Raw,
+    /// Grown to the most-specific NetBox subnet the moving end sits in — a clean CIDR selection.
+    Subnet,
+}
+
+/// An in-progress **lasso** on the map: a snake of cells between a fixed `anchor` and a moving
+/// `head`, both `d`-indices on the Gilbert curve (which is canopy's address-slice order, so a
+/// contiguous `d`-run is a contiguous address range). The selection is the inclusive span between
+/// them, optionally grown by `snap`. The callout content is derived from it in [`crate::lasso`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Lasso {
+    /// The fixed end (where the gesture began), a `d`-index.
+    pub anchor: usize,
+    /// The moving end (arrows / drag), a `d`-index.
+    pub head: usize,
+    /// How the raw span is snapped outward.
+    pub snap: LassoSnap,
+}
+
 /// The in-progress "allocate this address" flow.
 pub struct AllocFlow {
     /// The address being allocated.
@@ -195,6 +218,9 @@ pub struct App {
     /// ([`map_quadrants`](App::map_quadrants)) is highlighted. The arrows move it between
     /// quadrants, `Enter`/left-click zooms in, `Esc`/right-click zooms out.
     pub zoom_sel: usize,
+    /// The in-progress lasso selection, or `None` when not lassoing. Entered with `l`; arrows (or a
+    /// mouse drag) move its head, `Tab` cycles the snap, `Esc`/`l` leaves. Drives the callout.
+    pub lasso: Option<Lasso>,
     /// When `true`, the map draws a rounded boundary around the subnet under the cursor (later
     /// reusable for VLANs). Toggled with `b`.
     pub show_subnets: bool,
@@ -285,6 +311,7 @@ impl App {
             grouping,
             color_by_group: false,
             zoom_sel: 0,
+            lasso: None,
             show_subnets: false,
             map_area: Rect::new(0, 0, 0, 0),
             pane_area: Rect::new(0, 0, 0, 0),
@@ -709,8 +736,24 @@ impl App {
         if self.zoom_anim.is_some() && nav {
             return;
         }
+        // Lasso mode captures navigation: arrows move the head, `s` snaps, `l`/`Esc` leave.
+        if self.lasso.is_some() {
+            let w = self.map_dims.0 as isize;
+            match code {
+                KeyCode::Char('q') | KeyCode::Char('Q') => self.quit = true,
+                KeyCode::Left => self.lasso_move(-1),
+                KeyCode::Right => self.lasso_move(1),
+                KeyCode::Up => self.lasso_move(-w),
+                KeyCode::Down => self.lasso_move(w),
+                KeyCode::Char('s') => self.lasso_cycle_snap(),
+                KeyCode::Char('l') | KeyCode::Esc => self.lasso = None,
+                _ => {}
+            }
+            return;
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Char('Q') => self.quit = true,
+            KeyCode::Char('l') => self.toggle_lasso(),
             KeyCode::Left => self.quadrant_move(-1, 0),
             KeyCode::Right => self.quadrant_move(1, 0),
             KeyCode::Up => self.quadrant_move(0, -1),
@@ -766,6 +809,90 @@ impl App {
     }
 
     /// Move the zoom selection to the quadrant nearest in direction `(dx, dy)` (each ∈ {−1,0,1}).
+    /// The number of curve cells in the current map (its `d`-space size).
+    fn map_cells(&self) -> usize {
+        let (w, h) = self.map_dims;
+        (w as usize * h as usize).max(1)
+    }
+
+    /// The cell `d` the last hover sits on — the seed when a lasso begins.
+    fn current_cell_d(&self) -> usize {
+        self.hover_d.unwrap_or(0).min(self.map_cells().saturating_sub(1))
+    }
+
+    /// Start a lasso at the current cell, or clear it if one is already open. Bound to `l`.
+    fn toggle_lasso(&mut self) {
+        self.lasso = match self.lasso {
+            Some(_) => None,
+            None => {
+                let d = self.current_cell_d();
+                Some(Lasso { anchor: d, head: d, snap: LassoSnap::Raw })
+            }
+        };
+    }
+
+    /// Move a lasso's head `dd` cells along the curve (±1 for Left/Right, ±a row for Up/Down),
+    /// clamped to the grid. No-op when not lassoing.
+    fn lasso_move(&mut self, dd: isize) {
+        let last = self.map_cells().saturating_sub(1) as isize;
+        if let Some(l) = self.lasso.as_mut() {
+            l.head = (l.head as isize + dd).clamp(0, last) as usize;
+        }
+    }
+
+    /// Cycle a lasso's snap mode (Raw ⇄ Subnet). Bound to `s` while lassoing.
+    fn lasso_cycle_snap(&mut self) {
+        if let Some(l) = self.lasso.as_mut() {
+            l.snap = match l.snap {
+                LassoSnap::Raw => LassoSnap::Subnet,
+                LassoSnap::Subnet => LassoSnap::Raw,
+            };
+        }
+    }
+
+    /// The inclusive `d`-span the lasso selects, after snapping. `None` when not lassoing.
+    #[must_use]
+    pub fn lasso_dspan(&self) -> Option<(usize, usize)> {
+        let l = self.lasso?;
+        let cells = self.map_cells() as u128;
+        let raw = (l.anchor.min(l.head), l.anchor.max(l.head));
+        match l.snap {
+            LassoSnap::Raw => Some(raw),
+            LassoSnap::Subnet => {
+                // Grow to the most-specific subnet covering the head cell's address.
+                let head_addr = self.range.nth_slice(cells, l.head as u128).base();
+                let Some(sub) = Subnet::most_specific(&self.subnets, head_addr) else { return Some(raw) };
+                let block = AddrRange::from(sub.cidr);
+                let (Some(lo_off), Some(hi_off)) = (self.range.offset_of(block.base()), self.range.offset_of(block.last())) else {
+                    return Some(raw); // subnet spills outside the view — keep the raw span
+                };
+                let lo = self.range.slice_index(cells, lo_off) as usize;
+                let hi = self.range.slice_index(cells, hi_off) as usize;
+                Some((lo.min(hi), lo.max(hi)))
+            }
+        }
+    }
+
+    /// The lasso selection as address ranges — the snake decomposed into aligned CIDR blocks via
+    /// mullion's [`aligned_runs`](mullion::spacefill::Gilbert::aligned_runs), each a clean CIDR the
+    /// callout names. Empty when not lassoing.
+    #[must_use]
+    pub fn lasso_ranges(&self) -> Vec<AddrRange> {
+        let Some((lo, hi)) = self.lasso_dspan() else { return Vec::new() };
+        let (w, h) = self.map_dims;
+        let g = mullion::spacefill::Gilbert::new(w, h);
+        let cells: Vec<(u32, u32)> = (lo..=hi).map(|d| g.d_to_xy(d)).collect();
+        let n = self.map_cells() as u128;
+        g.aligned_runs(&cells).into_iter().map(|r| self.range.span_slices(n, r.start as u128, r.end as u128)).collect()
+    }
+
+    /// The callout summary for the current lasso, or `None` when not lassoing.
+    #[must_use]
+    pub fn lasso_summary(&self) -> Option<crate::lasso::Summary> {
+        let ranges = self.lasso_ranges();
+        (!ranges.is_empty()).then(|| crate::lasso::summarize(&ranges, &self.facts, &self.grouping, &self.subnets))
+    }
+
     fn quadrant_move(&mut self, dx: i32, dy: i32) {
         let quads = self.map_quadrants();
         if quads.len() < 2 {
@@ -971,6 +1098,24 @@ impl App {
     /// the pane, the wheel scrolls the host list and hovering a name lights up its curve cell.
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         if self.view != View::Map {
+            return;
+        }
+        // While lassoing, the pointer over the curve stretches the snake instead of zooming: a
+        // left-press re-anchors, and moving/dragging drives the head (rubber-band from the anchor).
+        if self.lasso.is_some() && !self.over_pane(ev.column, ev.row) {
+            match ev.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(d) = self.cell_at_mouse(ev.column, ev.row) {
+                        self.lasso = Some(Lasso { anchor: d, head: d, snap: LassoSnap::Raw });
+                    }
+                }
+                MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+                    if let (Some(d), Some(l)) = (self.cell_at_mouse(ev.column, ev.row), self.lasso.as_mut()) {
+                        l.head = d;
+                    }
+                }
+                _ => {}
+            }
             return;
         }
         if self.over_pane(ev.column, ev.row) {
@@ -1753,6 +1898,43 @@ mod tests {
         // Moving off the pane and over empty space clears the sync.
         app.on_mouse(MouseEvent { kind: MouseEventKind::Moved, column: 0, row: 0, modifiers: KeyModifiers::empty() });
         assert_eq!(app.hover_d, None);
+    }
+
+    #[test]
+    fn lasso_selects_clean_cidrs_and_summarizes_them() {
+        let facts: Vec<AddressFacts> = ["10.87.3.10", "10.87.3.20"]
+            .iter()
+            .map(|a| AddressFacts { addr: a.parse().unwrap(), netbox: None, ptr: Some("dop21.".into()), live: true })
+            .collect();
+        let mut app = App::new(Cidr::parse("10.87.3.0/24").unwrap(), facts, false, false, false, Config::default());
+        app.view = View::Map;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 40));
+        crate::tui::map::screen(&mut buf, &mut app); // populates map_dims
+
+        assert!(app.lasso.is_none());
+        assert!(app.lasso_ranges().is_empty(), "no lasso → no ranges");
+
+        // `l` starts a lasso; arrows stretch its head along the curve.
+        app.on_key(KeyCode::Char('l'));
+        assert!(app.lasso.is_some(), "l starts a lasso");
+        for _ in 0..8 {
+            app.on_key(KeyCode::Right);
+        }
+        crate::tui::map::screen(&mut buf, &mut app); // must not panic drawing the callout
+
+        // The snake reduces to aligned CIDR blocks — every range is a clean CIDR (aligned_runs).
+        let ranges = app.lasso_ranges();
+        assert!(!ranges.is_empty(), "a stretched lasso covers cells");
+        assert!(ranges.iter().all(|r| r.as_cidr().is_some()), "aligned_runs yields clean CIDR blocks");
+
+        // The summary names them; a v4 map yields a v4 range line.
+        let s = app.lasso_summary().expect("a lasso has a summary");
+        assert!(!s.title.is_empty(), "the callout has a title");
+        assert!(s.ipv4.is_some(), "v4 map → v4 range line");
+
+        // `l` again leaves lasso mode.
+        app.on_key(KeyCode::Char('l'));
+        assert!(app.lasso.is_none(), "l toggles the lasso off");
     }
 
     #[test]

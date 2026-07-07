@@ -262,6 +262,41 @@ fn mullion_label(r: &AddrRange) -> String {
     r.label()
 }
 
+/// Draw the lasso **callout** over the live map: the rounded ring around the selected snake, a
+/// leader wire routed to a floating box with the summary lines, all composited by mullion as
+/// marching-ants so the occupancy shows through the chrome. canopy owns the selection membership
+/// (`inside`), the anchor (the moving head), the box placement, and the lines; mullion draws it.
+fn draw_lasso_callout(buf: &mut Buffer, body: Rect, grid: &MapGrid, app: &App, clock: f32) {
+    let Some((lo, hi)) = app.lasso_dspan() else { return };
+    let Some(summary) = app.lasso_summary() else { return };
+
+    // Selection membership by screen cell — two columns map to one grid cell (mirrors the subnet
+    // outline), so the region is a clean 2-column-per-cell shape.
+    let inside = |sx: u16, sy: u16| -> bool {
+        if sx < body.x || sy < body.y {
+            return false;
+        }
+        let (gx, gy) = ((sx - body.x) / 2, sy - body.y);
+        grid.xy_to_d(u32::from(gx), u32::from(gy)).is_some_and(|d| (lo..=hi).contains(&(d as usize)))
+    };
+
+    // Anchor the leader at the moving head cell — where the eye is.
+    let head = app.lasso.map_or(hi, |l| l.head).min(grid.cells().saturating_sub(1));
+    let (hx, hy) = grid.cell_xy(head);
+    let anchor = (body.x + hx as u16 * 2, body.y + hy as u16);
+
+    // Place the box top-right of the body, sized to its lines (v1: canopy places, mullion routes).
+    let lines = summary.lines();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let longest = refs.iter().map(|s| s.chars().count()).max().unwrap_or(0) as u16;
+    let bw = (longest + 2).clamp(12, body.width.max(12)).min(body.width);
+    let bh = (refs.len() as u16 + 2).min(body.height.max(3));
+    let box_rect = Rect::new((body.x + body.width).saturating_sub(bw), body.y, bw, bh);
+
+    let style = BorderStyle { weight: LineWeight::Light, corners: CornerStyle::Rounded, style: s_sel() };
+    curve_map::callout(buf, body, inside, anchor, box_rect, &refs, &style, clock, curve_map::CalloutDuty::default());
+}
+
 /// Draw a rounded boundary around the subnet the cursor sits in. Membership is by **most-specific**
 /// subnet, so a cell belongs to exactly one region and only that one subnet is outlined — no
 /// doubled edges between neighbours. `mullion::curve_map::draw_region_outline` traces the ring
@@ -354,13 +389,18 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
         Some(hd) => hover_glow(Some(hd), total, clock),
         None => ambient_glow(&grid, total, clock),
     };
-    // The hover beacon is allowed to burn far brighter than the idle shimmer's restrained ceiling.
-    let cap = if hovering { 1.7 } else { 0.85 };
+    // The lasso selection breathes *solidly* (colour channel; the curve glyph stays put) — the
+    // agreed split where the selection glows and only the callout chrome dithers.
+    let lasso_span = app.lasso_dspan();
+    let lasso_glow = lasso_span.map(|(lo, hi)| curve_map::pulse_segment(total, lo..hi + 1, clock * std::f32::consts::TAU * 0.3, 3));
+    // The hover beacon / selection glow burn brighter than the idle shimmer's restrained ceiling.
+    let cap = if hovering || lasso_span.is_some() { 1.7 } else { 0.85 };
     let lift: Vec<f32> = (0..total)
         .map(|d| {
             let base = ambient.get(d).copied().unwrap_or(0.0);
             let q = qglow.as_ref().map_or(0.0, |p| p(d) * 0.5);
-            (base + q).min(cap)
+            let ls = lasso_glow.as_ref().map_or(0.0, |p| p(d) * 0.9); // self-assured, near-solid
+            (base + q + ls).min(cap)
         })
         .collect();
 
@@ -423,8 +463,18 @@ pub fn screen(buf: &mut Buffer, app: &mut App) {
     // The two-column field strip across the top.
     draw_fields(buf, fields, app, &grid, &quads, used_total);
 
-    let hints: &[(&str, &str)] =
-        &[("← ↑ ↓ →", "quadrant"), ("↵/click", "zoom in"), ("Esc/rclick", "out"), ("g", "groups"), ("b", "subnets"), ("q", "quit")];
+    // The lasso callout — ring + routed leader + floating box — composited over the live map by
+    // mullion as marching-ants, so the map breathes through the chrome (labels stay opaque). Drawn
+    // last so it sits over everything in the body.
+    if app.lasso.is_some() {
+        draw_lasso_callout(buf, body, &grid, app, clock);
+    }
+
+    let hints: &[(&str, &str)] = if app.lasso.is_some() {
+        &[("← ↑ ↓ →", "stretch"), ("s", "snap"), ("l/Esc", "done"), ("q", "quit")]
+    } else {
+        &[("← ↑ ↓ →", "quadrant"), ("↵/click", "zoom"), ("Esc", "out"), ("l", "lasso"), ("g", "groups"), ("q", "quit")]
+    };
     keyhints(buf, area.x, foot_y, area.width, hints);
 }
 
