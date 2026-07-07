@@ -3,11 +3,11 @@
 //! The **fabric** subsystem: read-only collection of diagnostic artifacts from
 //! network devices (switches/routers) into a versioned on-disk store. Pure model
 //! (`inventory`, `profile`, `store`) plus one thin I/O seam (`collect`'s
-//! `CommandRunner`, implemented for `sources::vantage::Vantage`).
+//! `CommandRunner`, implemented for `sources::vantage::Vantage`). Wired into
+//! `main` via the `--fabric-collect` CLI.
 //!
-//! Built ahead of its consumers: `inventory` lands in this task, `profile`/`store`/
-//! `collect` follow in later tasks and wire it into `main`. Until then this surface
-//! is unused from the binary's perspective, so dead-code warnings are allowed here.
+//! Some surface (data fields in `profile`/`store` types) remains unused until
+//! export/TUI work consumes them.
 #![allow(dead_code)]
 
 pub mod collect;
