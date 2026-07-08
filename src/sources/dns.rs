@@ -61,30 +61,23 @@ struct ZoneRoute {
     vantage: Vantage,
 }
 
-/// An **IXFR delta**: the PTR facts added and the addresses whose records were removed, relative to
-/// a cached serial. Applied to the cached facts, it yields the new zone contents without a full
-/// transfer (a rename is a remove of the old PTR plus an add of the new, same address).
-struct IxfrDelta {
-    added: Vec<AddressFacts>,
-    removed: Vec<IpAddr>,
-}
-
 impl DnsSource {
-    /// Reverse-resolve `range`, transferring **only the reverse zones whose SOA serial has moved**
-    /// since the last sync — the launch-time cache (roadmap P13/P14).
+    /// Reverse-resolve `range`, skipping the transfer when the reverse zones' SOA serials haven't
+    /// moved since the last sync — the launch-time cache (roadmap P13).
     ///
-    /// Per zone: a cheap `dig SOA` gives the current serial; unchanged zones load from `store`, and
-    /// a moved one is transferred on its own — an **IXFR** delta from the cached serial when the
-    /// master supports it, else a full **AXFR** of just that zone. Only the deltas cross the wire.
+    /// One **batched** `dig SOA` fan-out (per server, in parallel) reads every routed zone's current
+    /// serial — the freshness check must not be one SSH round-trip per zone, or *checking* costs as
+    /// much as transferring. If every existing zone matches the cache, the whole reverse view loads
+    /// from disk and nothing crosses the wire (the win). If any moved — or nothing is cached yet —
+    /// one batched [`gather_with_progress`](DnsSource::gather_with_progress) transfers the range and
+    /// each zone is re-snapshotted.
     ///
-    /// **Best-effort**: a range too large to key on zones, an unroutable estate, or a zone that
-    /// refuses transfer with no cache to fall back on drops through to the uncached
-    /// [`gather_with_progress`](DnsSource::gather_with_progress) (which includes the per-address
-    /// sweep), so the cache can only make a launch faster — never break it.
+    /// **Best-effort**: a range too large to key on zones, or an unroutable estate, drops through to
+    /// the uncached gather; a reverse `/24` that doesn't exist is simply skipped (no PTRs there), so
+    /// a sparse range no longer aborts the cache.
     ///
     /// # Errors
-    /// Propagates only a failure of the underlying transfer/sweep; the cache path itself degrades to
-    /// the full gather rather than erroring.
+    /// Propagates only a failure of the underlying transfer/sweep.
     pub fn gather_cached(&self, range: &Cidr, store: &Store, resweep: bool, mut on_progress: impl FnMut(f32, &str)) -> anyhow::Result<(Vec<AddressFacts>, CacheReport)> {
         let zones = reverse_zones(range);
         if zones.is_empty() {
@@ -95,36 +88,44 @@ impl DnsSource {
             return Ok((self.gather_with_progress(range, on_progress)?, CacheReport::default()));
         }
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let total = routes.len();
+        // One batched SOA probe per server — existing zones only (a non-existent /24 reverse zone
+        // simply isn't in the map and contributes nothing, rather than aborting the cache).
+        on_progress(0.01, "checking DNS freshness…");
+        let serials = self.probe_serials(&routes);
+
+        // Partition the existing zones: fresh (cached serial matches) vs stale (moved / uncached).
         let mut facts = Vec::new();
-        let mut report = CacheReport::default();
-        for (i, r) in routes.iter().enumerate() {
-            let serial = self.probe_serial(&r.vantage, &r.view, &r.zone);
-            let cached = store.load(&r.zone, &r.view);
-            let fresh = !resweep && matches!((serial, cached.as_ref()), (Some(s), Some(snap)) if is_fresh(Some(snap.serial), s));
-            if fresh {
-                if let Some(snap) = cached {
+        let mut fresh = 0usize;
+        let mut stale = false;
+        for r in &routes {
+            let Some(&serial) = serials.get(&r.zone) else { continue };
+            match store.load(&r.zone, &r.view) {
+                Some(snap) if !resweep && is_fresh(Some(snap.serial), serial) => {
                     facts.extend(snap.facts);
-                    report.fresh += 1;
+                    fresh += 1;
                 }
-            } else {
-                match self.transfer_zone(r, range, serial, cached.as_ref()) {
-                    Some((zone_facts, s)) => {
-                        let _ = store.save(&Snapshot { zone: r.zone.clone(), view: r.view.clone(), serial: s, synced: now, facts: zone_facts.clone() });
-                        facts.extend(zone_facts);
-                        report.refreshed += 1;
-                    }
-                    None => {
-                        // A zone that refuses transfer with no cache to trust — fall back to the
-                        // proven whole-range gather (which can reach it via the per-address sweep).
-                        return Ok((self.gather_with_progress(range, on_progress)?, CacheReport::default()));
-                    }
-                }
+                _ => stale = true,
             }
-            on_progress(0.05 + 0.87 * ((i + 1) as f32 / total as f32), &format!("zones {}/{total}", i + 1));
         }
-        Ok((facts, report))
+        if !stale {
+            // Every existing zone unchanged → the whole reverse view is served from disk.
+            return Ok((facts, CacheReport { fresh, refreshed: 0 }));
+        }
+
+        // Something moved (or a cold cache): one batched transfer of the range, then re-snapshot
+        // every existing zone with its freshly-probed serial. (Transferring only the moved zones —
+        // batched — is a future refinement; per-zone serial round-trips were slower than this.)
+        let all = self.gather_with_progress(range, on_progress)?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let mut refreshed = 0usize;
+        for r in &routes {
+            let Some(&serial) = serials.get(&r.zone) else { continue };
+            let Some(cidr) = crate::dns_discovery::reverse_zone_to_cidr(&r.zone) else { continue };
+            let zone_facts: Vec<AddressFacts> = all.iter().filter(|f| cidr.contains(f.addr)).cloned().collect();
+            let _ = store.save(&Snapshot { zone: r.zone.clone(), view: r.view.clone(), serial, synced: now, facts: zone_facts });
+            refreshed += 1;
+        }
+        Ok((all, CacheReport { fresh: 0, refreshed }))
     }
 
     /// Flatten the estate routing into one entry per reverse zone: which vantage reaches which
@@ -139,96 +140,37 @@ impl DnsSource {
         out
     }
 
-    /// Probe one reverse zone's current SOA serial — `None` if it doesn't answer.
-    fn probe_serial(&self, vantage: &Vantage, host: &str, zone: &str) -> Option<u64> {
-        let text = vantage.run(&format!("dig +noall +answer SOA {zone} @{host}")).ok()?;
-        crate::dns_discovery::parse_soa_record(&text).map(|r| r.serial)
-    }
-
-    /// Transfer one moved zone, returning its facts and the serial they represent. Tries **IXFR**
-    /// from the cached serial first (applying just the delta to the cached facts); if the master
-    /// answered with a full zone instead, uses that directly; otherwise falls back to a full
-    /// **AXFR** of the zone. `None` only when the server refuses entirely (so the caller can fall
-    /// back to the whole-range sweep).
-    fn transfer_zone(&self, r: &ZoneRoute, range: &Cidr, serial: Option<u64>, cached: Option<&Snapshot>) -> Option<(Vec<AddressFacts>, u64)> {
-        // IXFR needs a cached base to apply the delta to.
-        if let Some(snap) = cached {
-            if let Ok(text) = r.vantage.run(&format!("dig +noall +answer IXFR={} {} @{}", snap.serial, r.zone, r.view)) {
-                if let Some(delta) = parse_ixfr(&text, range) {
-                    return Some((apply_delta(&snap.facts, &delta), serial.unwrap_or(snap.serial)));
-                }
-                // The master fell back to a full transfer — use it rather than re-transferring.
-                if text.contains(" PTR ") {
-                    let s = serial.or_else(|| crate::dns_discovery::parse_soa_record(&text).map(|rec| rec.serial)).unwrap_or(snap.serial);
-                    return Some((parse_axfr(&text, range), s));
-                }
+    /// Batched SOA probe: one `dig` fan-out per (vantage, server) group reads every routed zone's
+    /// current serial in parallel. Non-existent zones (no SOA answer) simply don't appear in the
+    /// result, so the caller treats them as empty. Cheap next to a transfer, and — crucially — not
+    /// one SSH round-trip per zone.
+    fn probe_serials(&self, routes: &[ZoneRoute]) -> std::collections::HashMap<String, u64> {
+        // Group zones by the (vantage, server) that answers them, so each server is contacted once.
+        let mut groups: Vec<(&Vantage, &str, Vec<&str>)> = Vec::new();
+        for r in routes {
+            match groups.iter_mut().find(|(v, h, _)| v.host == r.vantage.host && v.jump == r.vantage.jump && *h == r.view) {
+                Some((_, _, zs)) => zs.push(&r.zone),
+                None => groups.push((&r.vantage, r.view.as_str(), vec![r.zone.as_str()])),
             }
         }
-        // No cache (or IXFR gave nothing usable): a full AXFR of just this zone.
-        let text = self.axfr_zone(&r.vantage, &r.view, &r.zone).ok()?;
-        if !text.contains("SOA") && !text.contains(" PTR ") {
-            return None; // refused
-        }
-        let s = serial.or_else(|| crate::dns_discovery::parse_soa_record(&text).map(|rec| rec.serial)).unwrap_or(0);
-        Some((parse_axfr(&text, range), s))
-    }
-}
-
-/// Parse a `dig IXFR=<serial>` answer into an add/remove [`IxfrDelta`], or `None` when it is **not**
-/// a valid incremental transfer (the master fell back to a full AXFR, or refused) — the caller then
-/// treats the answer as a full zone. IXFR answers are a run of SOA records delimiting alternating
-/// delete/add sections: `SOA(new)` then repeating `SOA(from) <deletions> SOA(to) <additions>`,
-/// closing back on `SOA(new)`. Parsed strictly (even SOA count, closes on the target, a real
-/// increment) so a full transfer never masquerades as an empty delta.
-fn parse_ixfr(output: &str, range: &Cidr) -> Option<IxfrDelta> {
-    let lines: Vec<&str> = output.lines().collect();
-    let mut soa: Vec<(usize, u64)> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if let Some(si) = f.iter().position(|&t| t == "SOA") {
-            if let Some(serial) = f.get(si + 3).and_then(|s| s.parse::<u64>().ok()) {
-                soa.push((i, serial));
-            }
-        }
-    }
-    // A real IXFR is `SOA(new) (SOA(from) … SOA(to) …)+ SOA(new)` — an even count ≥ 4, closing on
-    // the target, with the first diff *from* a different serial. Anything else = a full transfer.
-    if soa.len() < 4 || soa.len() % 2 != 0 {
-        return None;
-    }
-    let target = soa[0].1;
-    if soa[1].1 == target || soa.last().map(|s| s.1) != Some(target) {
-        return None;
-    }
-    let (mut added, mut removed) = (Vec::new(), Vec::new());
-    for k in 1..soa.len() {
-        let start = soa[k].0 + 1;
-        let end = soa.get(k + 1).map_or(lines.len(), |p| p.0);
-        let deleting = k % 2 == 1; // SOA #1,#3,… open delete sections; #2,#4,… open add sections
-        for line in &lines[start..end] {
-            for fct in parse_axfr(line, range) {
-                if deleting {
-                    removed.push(fct.addr);
-                } else {
-                    added.push(fct);
+        let par = self.concurrency.clamp(1, 16);
+        let mut out = std::collections::HashMap::new();
+        for (vantage, host, zs) in groups {
+            let list = zs.join(" ");
+            // Prefix each SOA answer with its zone (the AXFR path's proven `sed` trick) so parallel
+            // replies can be told apart; parse the serial per line.
+            let remote = format!("printf '%s\\n' {list} | xargs -P{par} -n1 sh -c 'dig +noall +answer SOA \"$0\" @{host} 2>/dev/null | sed \"s/^/$0 /\"'");
+            let Ok(text) = vantage.run(&remote) else { continue };
+            for line in text.lines() {
+                if let Some((zone, rest)) = line.split_once(' ') {
+                    if let Some(rec) = crate::dns_discovery::parse_soa_record(rest) {
+                        out.insert(zone.trim_end_matches('.').to_string(), rec.serial);
+                    }
                 }
             }
         }
+        out
     }
-    Some(IxfrDelta { added, removed })
-}
-
-/// Apply an [`IxfrDelta`] to the cached facts: drop the removed addresses, then add/overwrite with
-/// the added ones. Deterministic (address-ordered) so the resulting snapshot round-trips cleanly.
-fn apply_delta(base: &[AddressFacts], delta: &IxfrDelta) -> Vec<AddressFacts> {
-    let mut map: std::collections::BTreeMap<IpAddr, AddressFacts> = base.iter().map(|f| (f.addr, f.clone())).collect();
-    for addr in &delta.removed {
-        map.remove(addr);
-    }
-    for f in &delta.added {
-        map.insert(f.addr, f.clone());
-    }
-    map.into_values().collect()
 }
 
 impl DnsSource {
@@ -666,55 +608,6 @@ pub fn parse_ptrs(output: &str) -> Vec<AddressFacts> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ixfr_delta_parses_deletes_and_adds() {
-        // A single-step IXFR for 10.87.3.0/24: rename .5 (old→new) and add .7.
-        let range = Cidr::parse("10.87.3.0/24").unwrap();
-        let ixfr = "\
-3.87.10.in-addr.arpa. 3600 IN SOA dns1. root. 3 1 1 1 1
-3.87.10.in-addr.arpa. 3600 IN SOA dns1. root. 1 1 1 1 1
-5.3.87.10.in-addr.arpa. 3600 IN PTR old.nfra.nl.
-3.87.10.in-addr.arpa. 3600 IN SOA dns1. root. 3 1 1 1 1
-5.3.87.10.in-addr.arpa. 3600 IN PTR new.nfra.nl.
-7.3.87.10.in-addr.arpa. 3600 IN PTR fresh.nfra.nl.
-3.87.10.in-addr.arpa. 3600 IN SOA dns1. root. 3 1 1 1 1";
-        let delta = parse_ixfr(ixfr, &range).expect("valid incremental transfer");
-        assert_eq!(delta.removed, vec!["10.87.3.5".parse::<IpAddr>().unwrap()]);
-        let added: Vec<_> = delta.added.iter().map(|f| (f.addr.to_string(), f.ptr.clone().unwrap())).collect();
-        assert_eq!(added, vec![("10.87.3.5".into(), "new.nfra.nl.".into()), ("10.87.3.7".into(), "fresh.nfra.nl.".into())]);
-    }
-
-    #[test]
-    fn ixfr_falls_back_when_master_sends_full_zone() {
-        // A master that won't do IXFR returns the whole zone (two SOAs, same serial) → not a delta.
-        let range = Cidr::parse("10.87.3.0/24").unwrap();
-        let full = "\
-3.87.10.in-addr.arpa. 3600 IN SOA dns1. root. 3 1 1 1 1
-5.3.87.10.in-addr.arpa. 3600 IN PTR a.nfra.nl.
-3.87.10.in-addr.arpa. 3600 IN SOA dns1. root. 3 1 1 1 1";
-        assert!(parse_ixfr(full, &range).is_none(), "a full transfer is not an incremental delta");
-        assert!(parse_ixfr(";; no answer\n", &range).is_none(), "a refusal is not a delta");
-    }
-
-    #[test]
-    fn applying_a_delta_renames_and_adds() {
-        let base = vec![
-            AddressFacts { addr: "10.87.3.5".parse().unwrap(), netbox: None, ptr: Some("old.nfra.nl.".into()), live: false },
-            AddressFacts { addr: "10.87.3.6".parse().unwrap(), netbox: None, ptr: Some("keep.nfra.nl.".into()), live: false },
-        ];
-        let delta = IxfrDelta {
-            removed: vec!["10.87.3.5".parse().unwrap()],
-            added: vec![
-                AddressFacts { addr: "10.87.3.5".parse().unwrap(), netbox: None, ptr: Some("new.nfra.nl.".into()), live: false },
-                AddressFacts { addr: "10.87.3.7".parse().unwrap(), netbox: None, ptr: Some("fresh.nfra.nl.".into()), live: false },
-            ],
-        };
-        let out = apply_delta(&base, &delta);
-        let by_addr: Vec<_> = out.iter().map(|f| (f.addr.to_string(), f.ptr.clone().unwrap())).collect();
-        // .5 renamed, .6 kept, .7 added — address-ordered.
-        assert_eq!(by_addr, vec![("10.87.3.5".into(), "new.nfra.nl.".into()), ("10.87.3.6".into(), "keep.nfra.nl.".into()), ("10.87.3.7".into(), "fresh.nfra.nl.".into())]);
-    }
 
     #[test]
     fn parses_reverse_sweep_output() {

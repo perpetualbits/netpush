@@ -46,7 +46,14 @@ pub fn gather_live(range: &Cidr, cfg: &Config, site: &str, resweep: bool) -> any
     // The on-disk mirror for this site; `None` if the cache dir can't be opened (best-effort — a
     // cache failure never blocks a gather, it just means a full sweep).
     let store = Store::open(crate::config::mirror_dir(site)).ok();
-    let data = gather_live_with_token(range, cfg, token, store.as_ref(), resweep, |_, _| {})?;
+    // A live activity indicator on stderr while the (possibly long) gather runs, so the terminal is
+    // never a silent freeze — one overwriting line showing the current stage + its own count.
+    let data = gather_live_with_token(range, cfg, token, store.as_ref(), resweep, |frac, label| {
+        use std::io::Write;
+        eprint!("\r  {:3.0}%  {label:<48}", frac * 100.0);
+        let _ = std::io::stderr().flush();
+    })?;
+    eprintln!(); // end the progress line before whatever prints next (the cache line, or the TUI)
     // Commit this sync to the mirror's git history, so `--since` can diff against it (P15).
     // Best-effort: no `git`, or nothing changed, is a silent no-op.
     if store.is_some() {
