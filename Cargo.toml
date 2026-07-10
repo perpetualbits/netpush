@@ -2,7 +2,9 @@
 # Copyright (C) 2026  Epsilon Null Operation
 
 [package]
-name = "canopy"
+# Published as `netcanopy` (`canopy` was taken on crates.io). The [[bin]] name
+# below stays `canopy`, so the installed command is unchanged.
+name = "netcanopy"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
